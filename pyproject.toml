@@ -1,0 +1,10 @@
+[project]
+name = "streaming-tools"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "pycairo>=1.29.0",
+    "pygobject>=3.54.5",
+]
