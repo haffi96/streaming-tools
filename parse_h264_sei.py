@@ -9,10 +9,10 @@ SEI timestamp format:
 
 Usage:
     # File mode
-    uv run python parse_h264_sei.py samples/annux-d-sample_timestamp_sei.h264
+    uv run python parse_h264_sei.py samples/annux-d-sample_timestamp_sei.h264 --stream-format byte-stream
 
     # TCP mode (connect to streaming source)
-    uv run python parse_h264_sei.py --tcp --host localhost --port 5004
+    uv run python parse_h264_sei.py --tcp --host localhost --port 5004 --stream-format byte-stream
 """
 
 import argparse
@@ -26,8 +26,68 @@ from pathlib import Path
 SEI_UUID = bytes.fromhex("3fa85f6457174562b3fc2c963f66afa6")
 
 
+def detect_stream_format(data: bytes) -> str:
+    """Detect H.264 stream format from data.
+
+    Args:
+        data: H.264 data
+
+    Returns:
+        'byte-stream' for Annex B format, 'avc' for length-prefixed format
+    """
+    if len(data) < 4:
+        return "byte-stream"
+
+    # Check for Annex B start codes
+    if data[:4] == b"\x00\x00\x00\x01" or data[:3] == b"\x00\x00\x01":
+        return "byte-stream"
+
+    # Check if first 4 bytes could be a valid length prefix
+    length = (data[0] << 24) | (data[1] << 16) | (data[2] << 8) | data[3]
+    if 0 < length < len(data) and len(data) > 4:
+        nal_type = data[4] & 0x1F
+        if 1 <= nal_type <= 12:
+            return "avc"
+
+    return "byte-stream"
+
+
+def find_avc_nalus(data: bytes, length_size: int = 4) -> list[tuple[int, int]]:
+    """Find all NAL units in AVC format (length-prefixed) data.
+
+    Args:
+        data: H.264 AVC format data
+        length_size: Size of length prefix (usually 4 bytes)
+
+    Returns:
+        List of (start_position, nalu_length) tuples
+    """
+    nalus = []
+    i = 0
+    while i + length_size <= len(data):
+        if length_size == 4:
+            nalu_len = (
+                (data[i] << 24) | (data[i + 1] << 16) | (data[i + 2] << 8) | data[i + 3]
+            )
+        elif length_size == 2:
+            nalu_len = (data[i] << 8) | data[i + 1]
+        else:
+            break
+
+        nalu_start = i + length_size
+        if nalu_start + nalu_len > len(data):
+            break
+
+        nalus.append((nalu_start, nalu_len))
+        i = nalu_start + nalu_len
+
+    return nalus
+
+
 def parse_h264_sei(filename: str, verbose: bool = False):
     """Parse H.264 file and extract SEI timestamps.
+
+    Supports both Annex B (byte-stream) and AVC (length-prefixed) formats.
 
     Args:
         filename: Path to H.264 file
@@ -38,39 +98,60 @@ def parse_h264_sei(filename: str, verbose: bool = False):
 
     print(f"Parsing: {filename}")
     print(f"File size: {len(data)} bytes")
+
+    stream_format = detect_stream_format(data)
+    print(f"Format: {stream_format}")
     print()
 
-    i = 0
     frame_num = 0
     prev_ts = None
     sei_count = 0
 
-    while i < len(data) - 4:
-        if data[i : i + 4] == b"\x00\x00\x00\x01":
-            start = i + 4
-        elif data[i : i + 3] == b"\x00\x00\x01":
-            start = i + 3
-        else:
-            i += 1
-            continue
+    if stream_format == "avc":
+        # AVC format - length-prefixed NAL units
+        nalus = find_avc_nalus(data)
+        for nalu_start, nalu_len in nalus:
+            if nalu_start >= len(data):
+                continue
 
-        nal_type = data[start] & 0x1F
+            nal_type = data[nalu_start] & 0x1F
 
-        if nal_type == 6:  # SEI
-            sei_count += 1
-            end = start + 1
-            while end < len(data) - 3:
-                if data[end : end + 3] == b"\x00\x00\x01":
-                    break
-                end += 1
+            if nal_type == 6:  # SEI
+                sei_count += 1
+                sei_payload = data[nalu_start + 1 : nalu_start + nalu_len]
+                result = parse_sei_message(sei_payload, frame_num, prev_ts, verbose)
+                if result is not None:
+                    prev_ts = result
+                    frame_num += 1
+    else:
+        # Annex B format - start code delimited
+        i = 0
+        while i < len(data) - 4:
+            if data[i : i + 4] == b"\x00\x00\x00\x01":
+                start = i + 4
+            elif data[i : i + 3] == b"\x00\x00\x01":
+                start = i + 3
+            else:
+                i += 1
+                continue
 
-            sei_payload = data[start + 1 : end]
-            result = parse_sei_message(sei_payload, frame_num, prev_ts, verbose)
-            if result is not None:
-                prev_ts = result
-                frame_num += 1
+            nal_type = data[start] & 0x1F
 
-        i = start
+            if nal_type == 6:  # SEI
+                sei_count += 1
+                end = start + 1
+                while end < len(data) - 3:
+                    if data[end : end + 3] == b"\x00\x00\x01":
+                        break
+                    end += 1
+
+                sei_payload = data[start + 1 : end]
+                result = parse_sei_message(sei_payload, frame_num, prev_ts, verbose)
+                if result is not None:
+                    prev_ts = result
+                    frame_num += 1
+
+            i = start
 
     print()
     print(f"Total SEI NAL units found: {sei_count}")
@@ -151,15 +232,21 @@ def parse_sei_message(
     return None
 
 
-def parse_tcp_stream(host: str, port: int, verbose: bool = False):
+def parse_tcp_stream(
+    host: str, port: int, stream_format: str = "byte-stream", verbose: bool = False
+):
     """Parse H.264 stream from TCP connection and extract SEI timestamps.
+
+    Supports both Annex B (byte-stream) and AVC (length-prefixed) formats.
 
     Args:
         host: TCP server host
         port: TCP server port
+        stream_format: 'byte-stream' for Annex B or 'avc' for length-prefixed
         verbose: Print additional debug info
     """
     print(f"Connecting to {host}:{port}...")
+    print(f"Format: {stream_format}")
 
     try:
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -192,59 +279,95 @@ def parse_tcp_stream(host: str, port: int, verbose: bool = False):
             except KeyboardInterrupt:
                 raise
 
-            # Process complete NAL units in buffer
-            while True:
-                # Find first start code
-                start_idx = -1
-                for i in range(len(buffer) - 3):
-                    if buffer[i : i + 4] == b"\x00\x00\x00\x01":
-                        start_idx = i
-                        break
-                    elif buffer[i : i + 3] == b"\x00\x00\x01":
-                        start_idx = i
-                        break
-
-                if start_idx == -1:
-                    # No start code found, keep last 3 bytes (might be partial)
-                    if len(buffer) > 3:
-                        buffer = buffer[-3:]
-                    break
-
-                # Find next start code
-                nal_start = start_idx + (
-                    4 if buffer[start_idx : start_idx + 4] == b"\x00\x00\x00\x01" else 3
-                )
-                next_idx = -1
-                for i in range(nal_start, len(buffer) - 3):
-                    if buffer[i : i + 4] == b"\x00\x00\x00\x01":
-                        next_idx = i
-                        break
-                    elif buffer[i : i + 3] == b"\x00\x00\x01":
-                        next_idx = i
-                        break
-
-                if next_idx == -1:
-                    # No complete NAL unit yet, wait for more data
-                    break
-
-                # Extract NAL unit
-                nal_data = bytes(buffer[nal_start:next_idx])
-                buffer = buffer[next_idx:]
-
-                if len(nal_data) == 0:
-                    continue
-
-                nal_type = nal_data[0] & 0x1F
-
-                if nal_type == 6:  # SEI
-                    sei_count += 1
-                    sei_payload = nal_data[1:]
-                    result = parse_sei_message_live(
-                        sei_payload, frame_num, prev_ts, verbose
+            if stream_format == "avc":
+                # Process AVC format - length-prefixed NAL units
+                while len(buffer) >= 4:
+                    # Read 4-byte length prefix
+                    nalu_len = (
+                        (buffer[0] << 24)
+                        | (buffer[1] << 16)
+                        | (buffer[2] << 8)
+                        | buffer[3]
                     )
-                    if result is not None:
-                        prev_ts = result
-                        frame_num += 1
+
+                    # Check if we have the complete NAL unit
+                    if len(buffer) < 4 + nalu_len:
+                        break
+
+                    # Extract NAL unit (skip length prefix)
+                    nal_data = bytes(buffer[4 : 4 + nalu_len])
+                    buffer = buffer[4 + nalu_len :]
+
+                    if len(nal_data) == 0:
+                        continue
+
+                    nal_type = nal_data[0] & 0x1F
+
+                    if nal_type == 6:  # SEI
+                        sei_count += 1
+                        sei_payload = nal_data[1:]
+                        result = parse_sei_message_live(
+                            sei_payload, frame_num, prev_ts, verbose
+                        )
+                        if result is not None:
+                            prev_ts = result
+                            frame_num += 1
+            else:
+                # Process byte-stream format - start code delimited
+                while True:
+                    # Find first start code
+                    start_idx = -1
+                    for i in range(len(buffer) - 3):
+                        if buffer[i : i + 4] == b"\x00\x00\x00\x01":
+                            start_idx = i
+                            break
+                        elif buffer[i : i + 3] == b"\x00\x00\x01":
+                            start_idx = i
+                            break
+
+                    if start_idx == -1:
+                        # No start code found, keep last 3 bytes (might be partial)
+                        if len(buffer) > 3:
+                            buffer = buffer[-3:]
+                        break
+
+                    # Find next start code
+                    nal_start = start_idx + (
+                        4
+                        if buffer[start_idx : start_idx + 4] == b"\x00\x00\x00\x01"
+                        else 3
+                    )
+                    next_idx = -1
+                    for i in range(nal_start, len(buffer) - 3):
+                        if buffer[i : i + 4] == b"\x00\x00\x00\x01":
+                            next_idx = i
+                            break
+                        elif buffer[i : i + 3] == b"\x00\x00\x01":
+                            next_idx = i
+                            break
+
+                    if next_idx == -1:
+                        # No complete NAL unit yet, wait for more data
+                        break
+
+                    # Extract NAL unit
+                    nal_data = bytes(buffer[nal_start:next_idx])
+                    buffer = buffer[next_idx:]
+
+                    if len(nal_data) == 0:
+                        continue
+
+                    nal_type = nal_data[0] & 0x1F
+
+                    if nal_type == 6:  # SEI
+                        sei_count += 1
+                        sei_payload = nal_data[1:]
+                        result = parse_sei_message_live(
+                            sei_payload, frame_num, prev_ts, verbose
+                        )
+                        if result is not None:
+                            prev_ts = result
+                            frame_num += 1
 
     except KeyboardInterrupt:
         print("\n\nInterrupted")
@@ -356,6 +479,12 @@ def main():
         help="TCP server port (default: 5004)",
     )
     parser.add_argument(
+        "--stream-format",
+        choices=["byte-stream", "avc"],
+        default="byte-stream",
+        help="H.264 stream format for TCP: 'byte-stream' (Annex B) or 'avc' (length-prefixed)",
+    )
+    parser.add_argument(
         "-v",
         "--verbose",
         action="store_true",
@@ -366,7 +495,7 @@ def main():
 
     if args.tcp:
         # TCP mode
-        return parse_tcp_stream(args.host, args.port, args.verbose)
+        return parse_tcp_stream(args.host, args.port, args.stream_format, args.verbose)
     else:
         # File mode
         file_path = args.file or "samples/annux-d-sample_timestamp_sei.h264"
