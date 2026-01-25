@@ -8,3 +8,13 @@ dependencies = [
     "pycairo>=1.29.0",
     "pygobject>=3.54.5",
 ]
+
+[dependency-groups]
+dev = [
+    "ruff>=0.14.14",
+]
+
+[tool.ruff.lint]
+# E402: Module level import not at top of file
+# Required for GStreamer: gi.require_version() must come before gi.repository imports
+ignore = ["E402"]

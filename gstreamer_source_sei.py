@@ -11,13 +11,13 @@ SEI timestamp format:
 
 Usage:
     # File output (for testing with parse_h264_sei.py)
-    uv run python gstreamer_source_sei.py --output file --path test.h264 --duration 5
+    uv run python gstreamer_source_sei.py --output file --path test.h264 --duration 5 --stream-format byte-stream
 
     # TCP output (for live streaming tests)
-    uv run python gstreamer_source_sei.py --output tcp --port 5004
+    uv run python gstreamer_source_sei.py --output tcp --port 5004 --stream-format byte-stream
 
     # Camera source instead of test pattern
-    uv run python gstreamer_source_sei.py --camera --output file --path camera.h264
+    uv run python gstreamer_source_sei.py --camera --output file --path camera.h264 --stream-format byte-stream
 """
 
 import argparse
@@ -35,11 +35,14 @@ from gi.repository import GLib, Gst
 SEI_UUID = bytes.fromhex("3fa85f6457174562b3fc2c963f66afa6")
 
 
-def create_sei_nalu(timestamp_us: int | None = None) -> bytes:
+def create_sei_nalu(
+    timestamp_us: int | None = None, stream_format: str = "byte-stream"
+) -> bytes:
     """Create an SEI NAL unit containing a timestamp.
 
     Args:
         timestamp_us: Timestamp in microseconds. If None, uses current time.
+        stream_format: 'byte-stream' for Annex B or 'avc' for length-prefixed
 
     Returns:
         Bytes containing a complete SEI NAL unit with timestamp.
@@ -52,26 +55,36 @@ def create_sei_nalu(timestamp_us: int | None = None) -> bytes:
     payload_type = 5  # user_data_unregistered
     payload_size = len(payload)  # 24 bytes
 
-    # Build SEI NAL unit
-    sei_nalu = bytearray()
-
-    # Annex B start code
-    sei_nalu.extend([0x00, 0x00, 0x00, 0x01])
+    # Build NAL unit content (without framing)
+    nal_content = bytearray()
 
     # NAL header: nal_ref_idc=0, nal_unit_type=6 (SEI)
-    sei_nalu.append(0x06)
+    nal_content.append(0x06)
 
     # Payload type (single byte since 5 < 255)
-    sei_nalu.append(payload_type)
+    nal_content.append(payload_type)
 
     # Payload size (single byte since 24 < 255)
-    sei_nalu.append(payload_size)
+    nal_content.append(payload_size)
 
     # Payload data
-    sei_nalu.extend(payload)
+    nal_content.extend(payload)
 
     # RBSP trailing bits (stop bit + alignment)
-    sei_nalu.append(0x80)
+    nal_content.append(0x80)
+
+    # Add framing based on stream format
+    sei_nalu = bytearray()
+
+    if stream_format == "avc":
+        # AVC format: 4-byte big-endian length prefix
+        nal_length = len(nal_content)
+        sei_nalu.extend(struct.pack(">I", nal_length))
+    else:
+        # Annex B format: start code
+        sei_nalu.extend([0x00, 0x00, 0x00, 0x01])
+
+    sei_nalu.extend(nal_content)
 
     return bytes(sei_nalu)
 
@@ -79,7 +92,8 @@ def create_sei_nalu(timestamp_us: int | None = None) -> bytes:
 class SeiInjector:
     """Handles SEI timestamp injection via pad probe."""
 
-    def __init__(self):
+    def __init__(self, stream_format: str = "byte-stream"):
+        self.stream_format = stream_format
         self.probe_id: int = 0
         self.frame_count: int = 0
 
@@ -91,8 +105,8 @@ class SeiInjector:
         if not buffer:
             return Gst.PadProbeReturn.OK
 
-        # Create SEI NAL unit with current timestamp
-        sei_nalu = create_sei_nalu()
+        # Create SEI NAL unit with current timestamp and matching format
+        sei_nalu = create_sei_nalu(stream_format=self.stream_format)
 
         # Map the original buffer to read its data
         success, map_info = buffer.map(Gst.MapFlags.READ)
@@ -149,6 +163,7 @@ def create_pipeline(
     use_camera: bool,
     fps: int,
     duration: int | None,
+    stream_format: str = "byte-stream",
 ) -> tuple[Gst.Pipeline, SeiInjector] | None:
     """Create GStreamer pipeline for H.264 stream with SEI timestamps.
 
@@ -159,6 +174,7 @@ def create_pipeline(
         use_camera: Use camera instead of test pattern
         fps: Frames per second
         duration: Duration in seconds (file mode only)
+        stream_format: 'byte-stream' for Annex B or 'avc' for length-prefixed
 
     Returns:
         Tuple of (pipeline, sei_injector) or None on failure.
@@ -209,7 +225,7 @@ def create_pipeline(
     # Encoder
     encoder = Gst.ElementFactory.make("x264enc", "encoder")
     encoder.set_property("speed-preset", "ultrafast")
-    # encoder.set_property("tune", "zerolatency") # FIXME: doesn't work with lk cli
+    # encoder.set_property("tune", "zerolatency") # doesn't work with lk cli
     encoder.set_property("key-int-max", fps)  # Keyframe every second
     encoder.set_property("bframes", 0)
 
@@ -217,13 +233,11 @@ def create_pipeline(
     parser = Gst.ElementFactory.make("h264parse", "parser")
     parser.set_property("config-interval", 1)  # Insert SPS/PPS frequently
 
-    # Output caps - byte-stream for file, avc for TCP
+    # Output caps based on stream format
     output_caps = Gst.ElementFactory.make("capsfilter", "output-caps")
-    if output_mode == "file":
-        output_caps_str = Gst.Caps.from_string("video/x-h264,stream-format=byte-stream")
-    else:
-        # TODO: output_caps_str = Gst.Caps.from_string("video/x-h264,stream-format=avc")
-        output_caps_str = Gst.Caps.from_string("video/x-h264,stream-format=byte-stream")
+    output_caps_str = Gst.Caps.from_string(
+        f"video/x-h264,stream-format={stream_format}"
+    )
     output_caps.set_property("caps", output_caps_str)
 
     # Queue
@@ -279,13 +293,13 @@ def create_pipeline(
     queue.link(sink)
 
     # Setup SEI injection on encoder output
-    sei_injector = SeiInjector()
+    sei_injector = SeiInjector(stream_format)
     src_pad = encoder.get_static_pad("src")
     if src_pad:
         sei_injector.probe_id = src_pad.add_probe(
             Gst.PadProbeType.BUFFER, sei_injector.probe_callback
         )
-        print("SEI injection enabled (big-endian microseconds)")
+        print(f"SEI injection enabled (format: {stream_format})")
     else:
         print("WARNING: Could not setup SEI injection")
 
@@ -331,6 +345,12 @@ def main():
         default=5,
         help="Duration in seconds (file mode only, default: 5)",
     )
+    parser.add_argument(
+        "--stream-format",
+        choices=["byte-stream", "avc"],
+        default="byte-stream",
+        help="H.264 stream format: 'byte-stream' (Annex B) or 'avc' (length-prefixed)",
+    )
 
     args = parser.parse_args()
 
@@ -345,6 +365,7 @@ def main():
         use_camera=args.camera,
         fps=args.fps,
         duration=args.duration if args.output == "file" else None,
+        stream_format=args.stream_format,
     )
 
     if result is None:
