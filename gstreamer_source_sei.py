@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Generate H.264 streams with SEI timestamp metadata for E2E latency measurement.
 
-Supports two output modes:
+Supports output modes:
 - file: Write to H.264 file (Annex B byte-stream format)
-- tcp: Stream via TCP server sink
+- tcp: Stream H.264 via TCP server sink
+- raw-nv12: Stream raw NV12 frames via TCP server sink (fixed-size frames)
 
 SEI timestamp format:
 - UUID: 3fa85f6457174562b3fc2c963f66afa6 (16 bytes)
@@ -15,6 +16,9 @@ Usage:
 
     # TCP output (for live streaming tests)
     uv run python gstreamer_source_sei.py --output tcp --port 5004 --stream-format byte-stream
+
+    # Raw NV12 TCP output (fixed-size frames)
+    uv run python gstreamer_source_sei.py --output raw-nv12 --port 5004 --width 1280 --height 720 --fps 30
 
     # Camera source instead of test pattern
     uv run python gstreamer_source_sei.py --camera --output file --path camera.h264 --stream-format byte-stream
@@ -162,17 +166,21 @@ def create_pipeline(
     port: int,
     use_camera: bool,
     fps: int,
+    width: int,
+    height: int,
     duration: int | None,
     stream_format: str = "byte-stream",
-) -> tuple[Gst.Pipeline, SeiInjector] | None:
-    """Create GStreamer pipeline for H.264 stream with SEI timestamps.
+) -> tuple[Gst.Pipeline, SeiInjector | None] | None:
+    """Create GStreamer pipeline for H.264 stream with SEI timestamps or raw NV12.
 
     Args:
-        output_mode: 'file' or 'tcp'
+        output_mode: 'file', 'tcp', or 'raw-nv12'
         output_path: Path for file output
         port: Port for TCP output
         use_camera: Use camera instead of test pattern
         fps: Frames per second
+        width: Frame width
+        height: Frame height
         duration: Duration in seconds (file mode only)
         stream_format: 'byte-stream' for Annex B or 'avc' for length-prefixed
 
@@ -180,6 +188,8 @@ def create_pipeline(
         Tuple of (pipeline, sei_injector) or None on failure.
     """
     pipeline = Gst.Pipeline.new("sei-timestamp-pipeline")
+
+    is_raw_nv12 = output_mode == "raw-nv12"
 
     # Source
     if use_camera:
@@ -205,9 +215,14 @@ def create_pipeline(
         src = Gst.ElementFactory.make("videotestsrc", "source")
         src.set_property("pattern", "ball")
         src.set_property("is-live", True)
-        videoconvert = None
-        videorate = None
-        videoscale = None
+        if is_raw_nv12:
+            videoconvert = Gst.ElementFactory.make("videoconvert", "convert")
+            videorate = Gst.ElementFactory.make("videorate", "rate")
+            videoscale = Gst.ElementFactory.make("videoscale", "scale")
+        else:
+            videoconvert = None
+            videorate = None
+            videoscale = None
 
         # For file output with duration, use num-buffers
         if output_mode == "file" and duration:
@@ -217,28 +232,34 @@ def create_pipeline(
 
     # Caps filter for resolution and framerate
     capsfilter = Gst.ElementFactory.make("capsfilter", "caps")
-    caps = Gst.Caps.from_string(
-        f"video/x-raw,format=I420,width=1280,height=720,framerate={fps}/1"
-    )
+    if is_raw_nv12:
+        caps = Gst.Caps.from_string(
+            f"video/x-raw,format=NV12,width={width},height={height},framerate={fps}/1"
+        )
+    else:
+        caps = Gst.Caps.from_string(
+            f"video/x-raw,format=I420,width={width},height={height},framerate={fps}/1"
+        )
     capsfilter.set_property("caps", caps)
 
-    # Encoder
-    encoder = Gst.ElementFactory.make("x264enc", "encoder")
-    encoder.set_property("speed-preset", "ultrafast")
-    # encoder.set_property("tune", "zerolatency") # doesn't work with lk cli
-    encoder.set_property("key-int-max", fps)  # Keyframe every second
-    encoder.set_property("bframes", 0)
+    if not is_raw_nv12:
+        # Encoder
+        encoder = Gst.ElementFactory.make("x264enc", "encoder")
+        encoder.set_property("speed-preset", "ultrafast")
+        # encoder.set_property("tune", "zerolatency") # doesn't work with lk cli
+        encoder.set_property("key-int-max", fps)  # Keyframe every second
+        encoder.set_property("bframes", 0)
 
-    # H.264 parser
-    parser = Gst.ElementFactory.make("h264parse", "parser")
-    parser.set_property("config-interval", 1)  # Insert SPS/PPS frequently
+        # H.264 parser
+        parser = Gst.ElementFactory.make("h264parse", "parser")
+        parser.set_property("config-interval", 1)  # Insert SPS/PPS frequently
 
-    # Output caps based on stream format
-    output_caps = Gst.ElementFactory.make("capsfilter", "output-caps")
-    output_caps_str = Gst.Caps.from_string(
-        f"video/x-h264,stream-format={stream_format}"
-    )
-    output_caps.set_property("caps", output_caps_str)
+        # Output caps based on stream format
+        output_caps = Gst.ElementFactory.make("capsfilter", "output-caps")
+        output_caps_str = Gst.Caps.from_string(
+            f"video/x-h264,stream-format={stream_format}"
+        )
+        output_caps.set_property("caps", output_caps_str)
 
     # Queue
     queue = Gst.ElementFactory.make("queue", "queue")
@@ -253,11 +274,19 @@ def create_pipeline(
         sink.set_property("host", "0.0.0.0")
         sink.set_property("port", port)
         sink.set_property("sync", False)
-        print(f"Output: TCP port {port}")
+        if is_raw_nv12:
+            print(f"Output: TCP port {port} (raw NV12)")
+        else:
+            print(f"Output: TCP port {port}")
 
     # Check all elements created
-    elements = [src, capsfilter, encoder, parser, output_caps, queue, sink]
+    if is_raw_nv12:
+        elements = [src, capsfilter, queue, sink]
+    else:
+        elements = [src, capsfilter, encoder, parser, output_caps, queue, sink]
     if use_camera:
+        elements.extend([videoconvert, videorate, videoscale])
+    elif is_raw_nv12:
         elements.extend([videoconvert, videorate, videoscale])
 
     if not all(elements):
@@ -270,15 +299,20 @@ def create_pipeline(
         pipeline.add(videoconvert)
         pipeline.add(videorate)
         pipeline.add(videoscale)
+    elif is_raw_nv12:
+        pipeline.add(videoconvert)
+        pipeline.add(videorate)
+        pipeline.add(videoscale)
     pipeline.add(capsfilter)
-    pipeline.add(encoder)
-    pipeline.add(parser)
-    pipeline.add(output_caps)
+    if not is_raw_nv12:
+        pipeline.add(encoder)
+        pipeline.add(parser)
+        pipeline.add(output_caps)
     pipeline.add(queue)
     pipeline.add(sink)
 
     # Link elements
-    if use_camera:
+    if use_camera or is_raw_nv12:
         src.link(videoconvert)
         videoconvert.link(videorate)
         videorate.link(videoscale)
@@ -286,22 +320,28 @@ def create_pipeline(
     else:
         src.link(capsfilter)
 
-    capsfilter.link(encoder)
-    encoder.link(parser)
-    parser.link(output_caps)
-    output_caps.link(queue)
-    queue.link(sink)
-
-    # Setup SEI injection on encoder output
-    sei_injector = SeiInjector(stream_format)
-    src_pad = encoder.get_static_pad("src")
-    if src_pad:
-        sei_injector.probe_id = src_pad.add_probe(
-            Gst.PadProbeType.BUFFER, sei_injector.probe_callback
-        )
-        print(f"SEI injection enabled (format: {stream_format})")
+    if is_raw_nv12:
+        capsfilter.link(queue)
+        queue.link(sink)
     else:
-        print("WARNING: Could not setup SEI injection")
+        capsfilter.link(encoder)
+        encoder.link(parser)
+        parser.link(output_caps)
+        output_caps.link(queue)
+        queue.link(sink)
+
+    sei_injector = None
+    if not is_raw_nv12:
+        # Setup SEI injection on encoder output
+        sei_injector = SeiInjector(stream_format)
+        src_pad = encoder.get_static_pad("src")
+        if src_pad:
+            sei_injector.probe_id = src_pad.add_probe(
+                Gst.PadProbeType.BUFFER, sei_injector.probe_callback
+            )
+            print(f"SEI injection enabled (format: {stream_format})")
+        else:
+            print("WARNING: Could not setup SEI injection")
 
     return pipeline, sei_injector
 
@@ -312,9 +352,9 @@ def main():
     )
     parser.add_argument(
         "--output",
-        choices=["file", "tcp"],
+        choices=["file", "tcp", "raw-nv12"],
         default="file",
-        help="Output mode: 'file' or 'tcp' (default: file)",
+        help="Output mode: 'file', 'tcp', or 'raw-nv12' (default: file)",
     )
     parser.add_argument(
         "--path",
@@ -338,6 +378,18 @@ def main():
         type=int,
         default=30,
         help="Frames per second (default: 30)",
+    )
+    parser.add_argument(
+        "--width",
+        type=int,
+        default=1280,
+        help="Frame width (default: 1280)",
+    )
+    parser.add_argument(
+        "--height",
+        type=int,
+        default=720,
+        help="Frame height (default: 720)",
     )
     parser.add_argument(
         "--duration",
@@ -364,6 +416,8 @@ def main():
         port=args.port,
         use_camera=args.camera,
         fps=args.fps,
+        width=args.width,
+        height=args.height,
         duration=args.duration if args.output == "file" else None,
         stream_format=args.stream_format,
     )
@@ -372,6 +426,7 @@ def main():
         sys.exit(1)
 
     pipeline, sei_injector = result
+    sei_count = 0
 
     # Setup bus for messages
     loop = GLib.MainLoop()
@@ -380,9 +435,9 @@ def main():
 
     def on_message(bus, msg):
         if msg.type == Gst.MessageType.EOS:
-            print(
-                f"\nEOS reached. Injected SEI into {sei_injector.frame_count} frames."
-            )
+            if sei_injector:
+                sei_count = sei_injector.frame_count
+            print(f"\nEOS reached. Injected SEI into {sei_count} frames.")
             loop.quit()
         elif msg.type == Gst.MessageType.ERROR:
             error, debug = msg.parse_error()
@@ -399,7 +454,9 @@ def main():
     try:
         loop.run()
     except KeyboardInterrupt:
-        print(f"\nInterrupted. Injected SEI into {sei_injector.frame_count} frames.")
+        if sei_injector:
+            sei_count = sei_injector.frame_count
+        print(f"\nInterrupted. Injected SEI into {sei_count} frames.")
     finally:
         pipeline.set_state(Gst.State.NULL)
 
