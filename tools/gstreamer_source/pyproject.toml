@@ -1,0 +1,19 @@
+[project]
+name = "gstreamer-publisher"
+version = "0.1.0"
+description = "GStreamer publisher for network video/data streaming. Injects SEI timestamp metadata into the stream."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "pygobject>=3.56.2",
+]
+
+[dependency-groups]
+dev = [
+    "ruff>=0.14.14",
+]
+
+[tool.ruff.lint]
+# E402: Module level import not at top of file
+# Required for GStreamer: gi.require_version() must come before gi.repository imports
+ignore = ["E402"]

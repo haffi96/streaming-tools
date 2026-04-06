@@ -1,20 +1,13 @@
 [project]
 name = "streaming-tools"
 version = "0.1.0"
-description = "Add your description here"
-readme = "README.md"
-requires-python = ">=3.12"
-dependencies = [
-    "pycairo>=1.29.0",
-    "pygobject>=3.54.5",
-]
+description = "Network video/data streaming tools"
+requires-python = ">=3.10"
+
+[tool.uv.workspace]
+members = ["tools/*", "apps/*"]
 
 [dependency-groups]
 dev = [
     "ruff>=0.14.14",
 ]
-
-[tool.ruff.lint]
-# E402: Module level import not at top of file
-# Required for GStreamer: gi.require_version() must come before gi.repository imports
-ignore = ["E402"]
