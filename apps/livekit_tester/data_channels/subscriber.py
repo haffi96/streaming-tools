@@ -1,13 +1,12 @@
 import os
 import logging
 import asyncio
-import time
 from signal import SIGINT, SIGTERM
 from dotenv import load_dotenv
 from livekit import rtc
-import msgspec
 
 from common.auth import generate_token
+from common.data import now_time_micros, decode_ping
 
 load_dotenv()
 # ensure LIVEKIT_URL, LIVEKIT_API_KEY, and LIVEKIT_API_SECRET are set in your .env file
@@ -17,21 +16,6 @@ ROOM_NAME = os.environ["ROOM_NAME"]
 PING_TOPIC_NAME = "rtt_ping"
 ECHO_TOPIC_NAME = "rtt_echo"
 
-
-def monotonic_us() -> int:
-    return time.monotonic_ns() // 1_000
-
-
-def encode_ping(seq: int, sent_at_us: int) -> bytes:
-    return msgspec.json.encode({"seq": seq, "sent_at_us": sent_at_us})
-
-
-def decode_ping(payload: bytes) -> dict[str, int]:
-    message = msgspec.json.decode(payload)
-    return {
-        "seq": int(message["seq"]),
-        "sent_at_us": int(message["sent_at_us"]),
-    }
 
 
 async def main(room: rtc.Room):
@@ -52,7 +36,7 @@ async def main(room: rtc.Room):
                 len(data.data),
             )
 
-        latency = (monotonic_us() - ping["sent_at_us"]) / 1000.0
+        latency = (now_time_micros() - ping["sent_at_us"]) / 1000.0
 
         logging.info("One-way latency: %.3f ms", latency)
 

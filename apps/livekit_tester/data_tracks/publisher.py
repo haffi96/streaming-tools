@@ -1,7 +1,6 @@
 import os
 import logging
 import asyncio
-import json
 import time
 from signal import SIGINT, SIGTERM
 from dotenv import load_dotenv
@@ -9,6 +8,7 @@ from livekit import rtc
 import msgspec
 
 from common.auth import generate_token
+from common.data import encode_ping, decode_ping, now_time_micros
 
 load_dotenv()
 # ensure LIVEKIT_URL, LIVEKIT_API_KEY, and LIVEKIT_API_SECRET are set in your .env file
@@ -21,26 +21,10 @@ ECHO_TRACK_NAME = "rtt_echo"
 PING_INTERVAL_SECONDS = 0.5
 
 
-def monotonic_us() -> int:
-    return time.monotonic_ns() // 1_000
-
-
-def encode_ping(seq: int, sent_at_us: int) -> bytes:
-    return msgspec.json.encode({"seq": seq, "sent_at_us": sent_at_us})
-
-
-def decode_ping(payload: bytes) -> dict[str, int]:
-    message = msgspec.json.decode(payload)
-    return {
-        "seq": int(message["seq"]),
-        "sent_at_us": int(message["sent_at_us"]),
-    }
-
-
 async def push_frames(track: rtc.LocalDataTrack):
     seq = 0
     while True:
-        sent_at_us = monotonic_us()
+        sent_at_us = now_time_micros()
         try:
             frame = rtc.DataTrackFrame(
                 payload=encode_ping(seq, sent_at_us),
@@ -64,11 +48,11 @@ async def subscribe(track: rtc.RemoteDataTrack):
         async for frame in track.subscribe():
             try:
                 ping = decode_ping(frame.payload)
-            except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+            except (KeyError, TypeError, ValueError, msgspec.DecodeError) as exc:
                 logging.warning("Ignoring malformed echo frame: %s", exc)
                 continue
 
-            rtt_ms = (monotonic_us() - ping["sent_at_us"]) / 1000.0
+            rtt_ms = (now_time_micros() - ping["sent_at_us"]) / 1000.0
             logging.info("RTT seq=%d: %.3f ms", ping["seq"], rtt_ms)
     except rtc.SubscribeDataTrackError as e:
         logging.error("Failed to subscribe to '%s': %s", track.info.name, e.message)

@@ -1,7 +1,6 @@
 import os
 import logging
 import asyncio
-import json
 import time
 from signal import SIGINT, SIGTERM
 from dotenv import load_dotenv
@@ -9,6 +8,7 @@ from livekit import rtc
 import msgspec
 
 from common.auth import generate_token
+from common.data import decode_ping, now_time_micros
 
 load_dotenv()
 # ensure LIVEKIT_URL, LIVEKIT_API_KEY, and LIVEKIT_API_SECRET are set in your .env file
@@ -17,14 +17,6 @@ ROOM_NAME = os.environ["ROOM_NAME"]
 
 PING_TRACK_NAME = "rtt_ping"
 ECHO_TRACK_NAME = "rtt_echo"
-
-
-def decode_ping(payload: bytes) -> dict[str, int]:
-    message = msgspec.json.decode(payload)
-    return {
-        "seq": int(message["seq"]),
-        "sent_at_us": int(message["sent_at_us"]),
-    }
 
 
 async def subscribe(
@@ -47,7 +39,7 @@ async def subscribe(
         async for frame in track.subscribe():
             try:
                 ping = decode_ping(frame.payload)
-            except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+            except (KeyError, TypeError, ValueError, msgspec.DecodeError) as exc:
                 logging.warning("Ignoring malformed ping frame: %s", exc)
                 continue
 
@@ -57,11 +49,8 @@ async def subscribe(
                 len(frame.payload),
             )
 
-            if frame.user_timestamp is not None:
-                latency = (
-                    int(time.time() * 1_000_000) - frame.user_timestamp
-                ) / 1_000_000.0
-                logging.info("One-way latency: %.3f ms", latency * 1000.0)
+            latency = (now_time_micros() - ping["sent_at_us"]) / 1000.0
+            logging.info("One-way latency: %.3f ms", latency)
 
             try:
                 echo_track.try_push(
