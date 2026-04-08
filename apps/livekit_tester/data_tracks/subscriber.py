@@ -4,18 +4,23 @@ import asyncio
 import json
 import time
 from signal import SIGINT, SIGTERM
+from dotenv import load_dotenv
 from livekit import rtc
+import msgspec
 
-# Set the following environment variables with your own values
-TOKEN = os.environ.get("LIVEKIT_TOKEN")
-URL = os.environ.get("LIVEKIT_URL")
+from common.auth import generate_token
+
+load_dotenv()
+# ensure LIVEKIT_URL, LIVEKIT_API_KEY, and LIVEKIT_API_SECRET are set in your .env file
+LIVEKIT_URL = os.environ["LIVEKIT_URL"]
+ROOM_NAME = os.environ["ROOM_NAME"]
 
 PING_TRACK_NAME = "rtt_ping"
 ECHO_TRACK_NAME = "rtt_echo"
 
 
 def decode_ping(payload: bytes) -> dict[str, int]:
-    message = json.loads(payload.decode("utf-8"))
+    message = msgspec.json.decode(payload)
     return {
         "seq": int(message["seq"]),
         "sent_at_us": int(message["sent_at_us"]),
@@ -95,7 +100,8 @@ async def main(room: rtc.Room):
         task.add_done_callback(remove_task)
 
     try:
-        await room.connect(URL, TOKEN)
+        token = generate_token(ROOM_NAME, "subscriber", "Telemetry Subscriber")
+        await room.connect(LIVEKIT_URL, token)
         logger.info("connected to room %s", room.name)
         echo_track_holder["track"] = await room.local_participant.publish_data_track(
             name=ECHO_TRACK_NAME
