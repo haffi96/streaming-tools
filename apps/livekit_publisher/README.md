@@ -1,11 +1,11 @@
-# livekit-publisher
+# livekit_publisher
 
 Standalone Go CLI for publishing pre-encoded H.264/H.265 TCP streams into LiveKit.
 
 ## Usage
 
 ```bash
-go run ./cmd/livekit-publisher room join \
+go run ./cmd/livekit_publisher room join \
   --url wss://your-project.livekit.cloud \
   --api-key <key> \
   --api-secret <secret> \
@@ -20,7 +20,7 @@ go run ./cmd/livekit-publisher room join \
 Simulcast uses repeated `--publish` flags with the same logical name and explicit dimensions:
 
 ```bash
-go run ./cmd/livekit-publisher room join \
+go run ./cmd/livekit_publisher room join \
   --url wss://your-project.livekit.cloud \
   --api-key <key> \
   --api-secret <secret> \

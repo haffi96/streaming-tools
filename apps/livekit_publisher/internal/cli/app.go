@@ -3,14 +3,14 @@ package cli
 import (
 	"context"
 
-	"livekit-publisher/internal/publisher"
+	"livekit_publisher/internal/publisher"
 
 	"github.com/urfave/cli/v3"
 )
 
 func NewApp() *cli.Command {
 	return &cli.Command{
-		Name:                  "livekit-publisher",
+		Name:                  "livekit_publisher",
 		Usage:                 "Publish H.264/H.265 TCP streams to LiveKit",
 		EnableShellCompletion: true,
 		Before: func(ctx context.Context, cmd *cli.Command) (context.Context, error) {

@@ -4,7 +4,7 @@ import (
 	"context"
 	"time"
 
-	"livekit-publisher/internal/publisher"
+	"livekit_publisher/internal/publisher"
 
 	"github.com/urfave/cli/v3"
 )
@@ -17,7 +17,7 @@ func roomCommand() *cli.Command {
 			{
 				Name:      "join",
 				Usage:     "Join a room and publish TCP camera streams",
-				UsageText: "livekit-publisher room join [OPTIONS]",
+				UsageText: "livekit_publisher room join [OPTIONS]",
 				Action:    joinRoom,
 				Flags: []cli.Flag{
 					&cli.StringFlag{Name: "url", Usage: "LiveKit server websocket URL", Required: true},

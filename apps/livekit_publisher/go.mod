@@ -1,4 +1,4 @@
-module livekit-publisher
+module livekit_publisher
 
 go 1.25.0
 

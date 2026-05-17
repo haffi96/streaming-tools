@@ -68,7 +68,7 @@ func SetLogger() {
 			"pion": "error",
 		},
 	}
-	protologger.InitFromConfig(logConfig, "livekit-publisher")
+	protologger.InitFromConfig(logConfig, "livekit_publisher")
 	lksdk.SetLogger(protologger.GetLogger())
 }
 
