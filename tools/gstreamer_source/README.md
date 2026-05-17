@@ -1,4 +1,4 @@
-Python tools for streaming and parsing H.264 streams with SEI timestamp metadata.
+Python tools for streaming and parsing H.264 streams with SEI timestamp and frame ID metadata.
 
 Gstreamer stream:
 
@@ -39,7 +39,6 @@ Pre-requisites:
 - Gstream plugins
 - Python 3.10+
 - [uv (optional)](https://docs.astral.sh/uv/getting-started/installation/), can also just run with pip and a venv
-
 
 
 

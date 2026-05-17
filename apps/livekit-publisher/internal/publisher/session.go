@@ -204,6 +204,7 @@ func runIndependentPublishAttempt(ctx context.Context, room *lksdk.Room, cfg Ses
 		Name:                target.Name,
 		Source:              livekit.TrackSource_CAMERA,
 		AttachUserTimestamp: true,
+		AttachFrameId:       true,
 	}
 	if target.HasDimensions() {
 		options.VideoWidth = int(target.Width)
@@ -286,6 +287,7 @@ func runSimulcastPublishAttempt(ctx context.Context, room *lksdk.Room, cfg Sessi
 		Name:                group.Name,
 		Source:              livekit.TrackSource_CAMERA,
 		AttachUserTimestamp: true,
+		AttachFrameId:       true,
 	})
 	if err != nil {
 		closeClosers(conns)

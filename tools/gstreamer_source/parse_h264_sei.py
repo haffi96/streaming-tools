@@ -5,7 +5,8 @@ Extracts user_data_unregistered SEI messages (type 5) and displays timestamps.
 
 SEI timestamp format:
 - UUID: 3fa85f6457174562b3fc2c963f66afa6 (16 bytes)
-- Timestamp: 8 bytes, big-endian, microseconds since Unix epoch
+- Preferred: LKTS packet trailer carrying the user timestamp
+- Legacy fallback: raw 8-byte big-endian timestamp
 
 Usage:
     # File mode
@@ -24,6 +25,101 @@ from pathlib import Path
 
 # UUID for SEI timestamp messages (matches sample file and publisher/viewer)
 SEI_UUID = bytes.fromhex("3fa85f6457174562b3fc2c963f66afa6")
+PACKET_TRAILER_MAGIC = b"LKTS"
+TAG_USER_TIMESTAMP = 0x01
+TAG_FRAME_ID = 0x02
+
+
+def parse_packet_trailer(data: bytes) -> dict[str, int] | None:
+    """Parse an LKTS packet trailer payload."""
+    if len(data) < 5 or data[-4:] != PACKET_TRAILER_MAGIC:
+        return None
+
+    trailer_len = data[-5] ^ 0xFF
+    if trailer_len < 5 or trailer_len > len(data):
+        return None
+
+    tlv_region = data[-trailer_len:-5]
+    pos = 0
+    metadata: dict[str, int] = {}
+
+    while pos + 2 <= len(tlv_region):
+        tag = tlv_region[pos] ^ 0xFF
+        length = tlv_region[pos + 1] ^ 0xFF
+        pos += 2
+        if pos + length > len(tlv_region):
+            break
+
+        value = tlv_region[pos : pos + length]
+        if tag == TAG_USER_TIMESTAMP and length == 8:
+            metadata["timestamp_us"] = int.from_bytes(
+                bytes(byte ^ 0xFF for byte in value),
+                "big",
+            )
+        elif tag == TAG_FRAME_ID and length == 4:
+            metadata["frame_id"] = int.from_bytes(
+                bytes(byte ^ 0xFF for byte in value),
+                "big",
+            )
+        pos += length
+
+    return metadata or None
+
+
+def parse_user_data(uuid: bytes, user_data: bytes) -> tuple[int, str] | None:
+    """Parse timestamp metadata from the SEI user_data payload."""
+    if uuid != SEI_UUID:
+        return None
+
+    trailer_metadata = parse_packet_trailer(user_data)
+    if trailer_metadata and "timestamp_us" in trailer_metadata:
+        return trailer_metadata["timestamp_us"], "lkts"
+
+    if len(user_data) == 8:
+        return struct.unpack(">Q", user_data)[0], "legacy"
+
+    return None
+
+
+def format_timestamp_output(
+    ts_us: int,
+    frame_num: int,
+    prev_ts: int | None,
+    metadata_format: str,
+) -> str:
+    ts_sec = ts_us / 1_000_000
+    try:
+        dt = datetime.fromtimestamp(ts_sec, tz=timezone.utc)
+        dt_str = dt.isoformat()
+    except (ValueError, OSError):
+        dt_str = f"<invalid: {ts_us} us>"
+
+    delta_str = ""
+    if prev_ts is not None:
+        delta_ms = (ts_us - prev_ts) / 1000
+        delta_str = f"  Δ {delta_ms:.2f}ms"
+
+    return f"Frame {frame_num:4d}: {dt_str}  format={metadata_format}{delta_str}"
+
+
+def format_live_latency_output(
+    ts_us: int,
+    frame_num: int,
+    prev_ts: int | None,
+    metadata_format: str,
+) -> str:
+    current_us = int(time.time() * 1_000_000)
+    latency_ms = (current_us - ts_us) / 1000
+
+    delta_str = ""
+    if prev_ts is not None:
+        delta_ms = (ts_us - prev_ts) / 1000
+        delta_str = f"  Δ {delta_ms:.1f}ms"
+
+    return (
+        f"Frame {frame_num:4d}: latency={latency_ms:6.1f}ms"
+        f"  format={metadata_format}{delta_str}"
+    )
 
 
 def detect_stream_format(data: bytes) -> str:
@@ -207,24 +303,10 @@ def parse_sei_message(
                 print(f"  UUID: {uuid.hex()}")
                 print(f"  Data: {user_data.hex()}")
 
-            # Check UUID matches and data is 8 bytes
-            if len(user_data) == 8 and uuid == SEI_UUID:
-                # Parse timestamp (8 bytes, big-endian, microseconds)
-                ts_us = struct.unpack(">Q", user_data)[0]
-                ts_sec = ts_us / 1_000_000
-
-                try:
-                    dt = datetime.fromtimestamp(ts_sec, tz=timezone.utc)
-                    dt_str = dt.isoformat()
-                except (ValueError, OSError):
-                    dt_str = f"<invalid: {ts_us} us>"
-
-                delta_str = ""
-                if prev_ts is not None:
-                    delta_ms = (ts_us - prev_ts) / 1000  # us to ms
-                    delta_str = f"  Δ {delta_ms:.2f}ms"
-
-                print(f"Frame {frame_num:4d}: {dt_str}{delta_str}")
+            result = parse_user_data(uuid, user_data)
+            if result is not None:
+                ts_us, metadata_format = result
+                print(format_timestamp_output(ts_us, frame_num, prev_ts, metadata_format))
                 return ts_us
 
         i += sei_size
@@ -429,22 +511,14 @@ def parse_sei_message_live(
                 print(f"  UUID: {uuid.hex()}")
                 print(f"  Data: {user_data.hex()}")
 
-            # Check UUID matches and data is 8 bytes
-            if len(user_data) == 8 and uuid == SEI_UUID:
-                # Parse timestamp (8 bytes, big-endian, microseconds)
-                ts_us = struct.unpack(">Q", user_data)[0]
-
-                # Calculate E2E latency
-                current_us = int(time.time() * 1_000_000)
-                latency_ms = (current_us - ts_us) / 1000
-
-                # Frame delta
-                delta_str = ""
-                if prev_ts is not None:
-                    delta_ms = (ts_us - prev_ts) / 1000
-                    delta_str = f"  Δ {delta_ms:.1f}ms"
-
-                print(f"Frame {frame_num:4d}: latency={latency_ms:6.1f}ms{delta_str}")
+            result = parse_user_data(uuid, user_data)
+            if result is not None:
+                ts_us, metadata_format = result
+                print(
+                    format_live_latency_output(
+                        ts_us, frame_num, prev_ts, metadata_format
+                    )
+                )
                 return ts_us
 
         i += sei_size

@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
-"""Generate H.264 streams with SEI timestamp metadata for E2E latency measurement.
+"""Generate H.264 streams with SEI timestamp/frame ID metadata for E2E latency measurement.
 
 Supports output modes:
 - file: Write to H.264 file (Annex B byte-stream format)
 - tcp: Stream H.264 via TCP server sink
 - raw-nv12: Stream raw NV12 frames via TCP server sink (fixed-size frames)
 
-SEI timestamp format:
+SEI metadata format:
 - UUID: 3fa85f6457174562b3fc2c963f66afa6 (16 bytes)
-- Timestamp: 8 bytes, big-endian, microseconds since Unix epoch
+- LKTS packet trailer carrying the user timestamp and frame ID
 
 Usage:
     # File output (for testing with parse_h264_sei.py)
@@ -37,27 +37,58 @@ from gi.repository import GLib, Gst
 
 # UUID for SEI timestamp messages (matches sample file and publisher/viewer)
 SEI_UUID = bytes.fromhex("3fa85f6457174562b3fc2c963f66afa6")
+PACKET_TRAILER_MAGIC = b"LKTS"
+TAG_USER_TIMESTAMP = 0x01
+TAG_FRAME_ID = 0x02
+
+
+def append_packet_trailer(timestamp_us: int, frame_id: int = 0) -> bytes:
+    """Build the LKTS packet trailer expected by the LiveKit Go SDK."""
+    trailer = bytearray()
+
+    if timestamp_us != 0:
+        trailer.append(TAG_USER_TIMESTAMP ^ 0xFF)
+        trailer.append(8 ^ 0xFF)
+        for byte in struct.pack(">Q", timestamp_us):
+            trailer.append(byte ^ 0xFF)
+
+    if frame_id != 0:
+        trailer.append(TAG_FRAME_ID ^ 0xFF)
+        trailer.append(4 ^ 0xFF)
+        for byte in struct.pack(">I", frame_id):
+            trailer.append(byte ^ 0xFF)
+
+    if not trailer:
+        return b""
+
+    trailer_len = len(trailer) + 1 + len(PACKET_TRAILER_MAGIC)
+    trailer.append(trailer_len ^ 0xFF)
+    trailer.extend(PACKET_TRAILER_MAGIC)
+    return bytes(trailer)
 
 
 def create_sei_nalu(
-    timestamp_us: int | None = None, stream_format: str = "byte-stream"
+    timestamp_us: int | None = None,
+    frame_id: int = 0,
+    stream_format: str = "byte-stream",
 ) -> bytes:
-    """Create an SEI NAL unit containing a timestamp.
+    """Create an SEI NAL unit containing timestamp/frame ID metadata.
 
     Args:
         timestamp_us: Timestamp in microseconds. If None, uses current time.
+        frame_id: Optional frame ID to include in the packet trailer.
         stream_format: 'byte-stream' for Annex B or 'avc' for length-prefixed
 
     Returns:
-        Bytes containing a complete SEI NAL unit with timestamp.
+        Bytes containing a complete SEI NAL unit with timestamp/frame ID metadata.
     """
     if timestamp_us is None:
         timestamp_us = int(time.time() * 1_000_000)
 
-    # Build SEI payload: UUID (16 bytes) + timestamp (8 bytes, big-endian)
-    payload = SEI_UUID + struct.pack(">Q", timestamp_us)
+    # Build SEI payload: UUID (16 bytes) + LKTS packet trailer
+    payload = SEI_UUID + append_packet_trailer(timestamp_us, frame_id)
     payload_type = 5  # user_data_unregistered
-    payload_size = len(payload)  # 24 bytes
+    payload_size = len(payload)
 
     # Build NAL unit content (without framing)
     nal_content = bytearray()
@@ -68,7 +99,7 @@ def create_sei_nalu(
     # Payload type (single byte since 5 < 255)
     nal_content.append(payload_type)
 
-    # Payload size (single byte since 24 < 255)
+    # Payload size (single byte for the current timestamp/frame ID payload)
     nal_content.append(payload_size)
 
     # Payload data
@@ -94,12 +125,13 @@ def create_sei_nalu(
 
 
 class SeiInjector:
-    """Handles SEI timestamp injection via pad probe."""
+    """Handles SEI metadata injection via pad probe."""
 
     def __init__(self, stream_format: str = "byte-stream"):
         self.stream_format = stream_format
         self.probe_id: int = 0
         self.frame_count: int = 0
+        self.next_frame_id: int = 1
 
     def probe_callback(
         self, pad: Gst.Pad, info: Gst.PadProbeInfo
@@ -109,8 +141,14 @@ class SeiInjector:
         if not buffer:
             return Gst.PadProbeReturn.OK
 
-        # Create SEI NAL unit with current timestamp and matching format
-        sei_nalu = create_sei_nalu(stream_format=self.stream_format)
+        frame_id = self.next_frame_id
+        self.next_frame_id = (self.next_frame_id % 0xFFFFFFFF) + 1
+
+        # Create SEI NAL unit with current timestamp/frame ID and matching format
+        sei_nalu = create_sei_nalu(
+            frame_id=frame_id,
+            stream_format=self.stream_format,
+        )
 
         # Map the original buffer to read its data
         success, map_info = buffer.map(Gst.MapFlags.READ)
@@ -171,7 +209,7 @@ def create_pipeline(
     duration: int | None,
     stream_format: str = "byte-stream",
 ) -> tuple[Gst.Pipeline, SeiInjector | None] | None:
-    """Create GStreamer pipeline for H.264 stream with SEI timestamps or raw NV12.
+    """Create GStreamer pipeline for H.264 stream with SEI metadata or raw NV12.
 
     Args:
         output_mode: 'file', 'tcp', or 'raw-nv12'
@@ -348,7 +386,7 @@ def create_pipeline(
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Generate H.264 streams with SEI timestamp metadata"
+        description="Generate H.264 streams with SEI timestamp/frame ID metadata"
     )
     parser.add_argument(
         "--output",
