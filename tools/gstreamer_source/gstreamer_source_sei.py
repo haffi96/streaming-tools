@@ -31,11 +31,19 @@ import struct
 import subprocess
 import sys
 import time
+import logging
 
 import gi
 
 gi.require_version("Gst", "1.0")
 from gi.repository import GLib, Gst
+
+logging.basicConfig(
+    level="INFO",
+    format="[%(asctime)s] | %(levelname)-8s | %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+    handlers=[logging.StreamHandler()],
+)
 
 # UUID for SEI timestamp messages (matches sample file and publisher/viewer)
 SEI_UUID = bytes.fromhex("3fa85f6457174562b3fc2c963f66afa6")
@@ -182,7 +190,7 @@ class SeiInjector:
 
         self.frame_count += 1
         if self.frame_count % 30 == 0:
-            print(f"Injected SEI into {self.frame_count} frames")
+            logging.debug(f"Injected SEI into {self.frame_count} frames")
 
         # Drop the original buffer
         return Gst.PadProbeReturn.DROP
@@ -276,7 +284,7 @@ def enumerate_cameras() -> list[dict]:
     elif system == "Linux":
         return enumerate_cameras_linux()
     else:
-        print(f"WARNING: Camera enumeration not supported on {system}")
+        logging.warning(f"Camera enumeration not supported on {system}")
         return []
 
 
@@ -289,12 +297,12 @@ def prompt_camera_selection() -> tuple[str, dict] | None:
     cameras = enumerate_cameras()
 
     if not cameras:
-        print("ERROR: No cameras found on this system.")
+        logging.error("No cameras found on this system.")
         return None
 
     if len(cameras) == 1:
         cam = cameras[0]
-        print(f"Found 1 camera: {cam['name']}")
+        logging.info(f"Found 1 camera: {cam['name']}")
         return (cam["element"], cam["properties"])
 
     print("\nAvailable cameras:")
@@ -312,14 +320,14 @@ def prompt_camera_selection() -> tuple[str, dict] | None:
                 idx = int(choice)
             if 0 <= idx < len(cameras):
                 cam = cameras[idx]
-                print(f"Selected: {cam['name']}")
+                logging.info(f"Selected: {cam['name']}")
                 return (cam["element"], cam["properties"])
             else:
-                print(f"Invalid choice. Enter a number between 0 and {len(cameras) - 1}.")
+                logging.error(f"Invalid choice. Enter a number between 0 and {len(cameras) - 1}.")
         except ValueError:
-            print("Invalid input. Enter a number.")
+            logging.error("Invalid input. Enter a number.")
         except (EOFError, KeyboardInterrupt):
-            print("\nCancelled.")
+            logging.error("\nCancelled.")
             return None
 
 
@@ -363,13 +371,13 @@ def create_pipeline(
     if use_camera:
         camera_info = get_camera_source()
         if camera_info is None:
-            print(f"ERROR: No camera selected")
+            logging.error("No camera selected")
             return None
 
         element_name, properties = camera_info
         src = Gst.ElementFactory.make(element_name, "source")
         if src is None:
-            print(f"ERROR: Could not create {element_name}")
+            logging.error(f"Could not create {element_name}")
             return None
 
         for prop, value in properties.items():
@@ -378,7 +386,7 @@ def create_pipeline(
         videoconvert = Gst.ElementFactory.make("videoconvert", "convert")
         videorate = Gst.ElementFactory.make("videorate", "rate")
         videoscale = Gst.ElementFactory.make("videoscale", "scale")
-        print(f"Using camera ({element_name}) @ {fps} FPS")
+        logging.info(f"Using camera ({element_name}) @ {fps} FPS")
     else:
         src = Gst.ElementFactory.make("videotestsrc", "source")
         src.set_property("pattern", "ball")
@@ -396,7 +404,7 @@ def create_pipeline(
         if output_mode == "file" and duration:
             src.set_property("num-buffers", fps * duration)
 
-        print(f"Using test pattern @ {fps} FPS")
+        logging.info(f"Using test pattern @ {fps} FPS")
 
     # Caps filter for resolution and framerate
     capsfilter = Gst.ElementFactory.make("capsfilter", "caps")
@@ -436,16 +444,16 @@ def create_pipeline(
     if output_mode == "file":
         sink = Gst.ElementFactory.make("filesink", "sink")
         sink.set_property("location", output_path)
-        print(f"Output: {output_path}")
+        logging.info(f"Output: {output_path}")
     else:
         sink = Gst.ElementFactory.make("tcpserversink", "sink")
         sink.set_property("host", "0.0.0.0")
         sink.set_property("port", port)
         sink.set_property("sync", False)
         if is_raw_nv12:
-            print(f"Output: TCP port {port} (raw NV12)")
+            logging.info(f"Output: TCP port {port} (raw NV12)")
         else:
-            print(f"Output: TCP port {port}")
+            logging.info(f"Output: TCP port {port}")
 
     # Check all elements created
     if is_raw_nv12:
@@ -458,7 +466,7 @@ def create_pipeline(
         elements.extend([videoconvert, videorate, videoscale])
 
     if not all(elements):
-        print("ERROR: Not all elements could be created")
+        logging.error("Not all elements could be created")
         return None
 
     # Add elements to pipeline
@@ -507,9 +515,9 @@ def create_pipeline(
             sei_injector.probe_id = src_pad.add_probe(
                 Gst.PadProbeType.BUFFER, sei_injector.probe_callback
             )
-            print(f"SEI injection enabled (format: {stream_format})")
+            logging.info(f"SEI injection enabled (format: {stream_format})")
         else:
-            print("WARNING: Could not setup SEI injection")
+            logging.warning("Could not setup SEI injection")
 
     return pipeline, sei_injector
 
@@ -605,26 +613,30 @@ def main():
         if msg.type == Gst.MessageType.EOS:
             if sei_injector:
                 sei_count = sei_injector.frame_count
-            print(f"\nEOS reached. Injected SEI into {sei_count} frames.")
+            logging.info(f"\nEOS reached. Injected SEI into {sei_count} frames.")
             loop.quit()
         elif msg.type == Gst.MessageType.ERROR:
             error, debug = msg.parse_error()
-            print(f"ERROR: {error}")
-            print(f"Debug: {debug}")
+            logging.error(f"{error}")
+            logging.info(f"Debug: {debug}")
             loop.quit()
 
     bus.connect("message", on_message)
 
     # Start pipeline
-    print("Starting pipeline...")
+    logging.info("Starting pipeline...")
     pipeline.set_state(Gst.State.PLAYING)
+
+    logging.info(
+        "Started pipeline. Press Ctrl+C to stop."
+    )
 
     try:
         loop.run()
     except KeyboardInterrupt:
         if sei_injector:
             sei_count = sei_injector.frame_count
-        print(f"\nInterrupted. Injected SEI into {sei_count} frames.")
+        logging.info(f"\nInterrupted. Injected SEI into {sei_count} frames.")
     finally:
         pipeline.set_state(Gst.State.NULL)
 
