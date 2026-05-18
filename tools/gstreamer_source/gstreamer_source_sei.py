@@ -25,8 +25,10 @@ Usage:
 """
 
 import argparse
+import glob
 import platform
 import struct
+import subprocess
 import sys
 import time
 
@@ -186,16 +188,144 @@ class SeiInjector:
         return Gst.PadProbeReturn.DROP
 
 
-def get_camera_source():
-    """Get the appropriate camera source element based on the platform."""
-    system = platform.system()
+def enumerate_cameras_macos() -> list[dict]:
+    """Enumerate available cameras on macOS using avfvideosrc."""
+    cameras = []
+    # Use GStreamer device monitor to discover video sources
+    monitor = Gst.DeviceMonitor.new()
+    monitor.add_filter("Video/Source", None)
+    monitor.start()
+    devices = monitor.get_devices()
 
-    if system == "Darwin":  # macOS
-        return ("avfvideosrc", {"device-index": 0})
+    for i, device in enumerate(devices):
+        display_name = device.get_display_name()
+        properties = device.get_properties()
+        device_index = i
+        if properties:
+            # avfvideosrc uses integer device-index
+            idx = properties.get_value("device.api")
+            if idx:
+                pass  # just informational
+        cameras.append(
+            {
+                "index": device_index,
+                "name": display_name,
+                "element": "avfvideosrc",
+                "properties": {"device-index": device_index},
+            }
+        )
+
+    monitor.stop()
+    return cameras
+
+
+def enumerate_cameras_linux() -> list[dict]:
+    """Enumerate available cameras on Linux using v4l2."""
+    cameras = []
+    video_devices = sorted(glob.glob("/dev/video*"))
+
+    for device_path in video_devices:
+        name = device_path
+        # Try to get a friendly name via v4l2-ctl
+        try:
+            result = subprocess.run(
+                ["v4l2-ctl", "--device", device_path, "--info"],
+                capture_output=True,
+                text=True,
+                timeout=2,
+            )
+            if result.returncode == 0:
+                for line in result.stdout.splitlines():
+                    line = line.strip()
+                    if line.startswith("Card type"):
+                        name = line.split(":", 1)[1].strip()
+                        break
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            pass
+
+        # Verify the device can actually capture video by checking capabilities
+        try:
+            result = subprocess.run(
+                ["v4l2-ctl", "--device", device_path, "--all"],
+                capture_output=True,
+                text=True,
+                timeout=2,
+            )
+            if result.returncode == 0 and "Video Capture" not in result.stdout:
+                continue  # Skip non-capture devices (e.g. metadata nodes)
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            pass  # If v4l2-ctl not available, include the device anyway
+
+        cameras.append(
+            {
+                "index": len(cameras),
+                "name": f"{name} ({device_path})",
+                "element": "v4l2src",
+                "properties": {"device": device_path},
+            }
+        )
+
+    return cameras
+
+
+def enumerate_cameras() -> list[dict]:
+    """Enumerate available cameras on the current platform."""
+    system = platform.system()
+    if system == "Darwin":
+        return enumerate_cameras_macos()
     elif system == "Linux":
-        return ("v4l2src", {"device": "/dev/video0"})
+        return enumerate_cameras_linux()
     else:
+        print(f"WARNING: Camera enumeration not supported on {system}")
+        return []
+
+
+def prompt_camera_selection() -> tuple[str, dict] | None:
+    """Prompt the user to pick from available cameras.
+
+    Returns:
+        Tuple of (element_name, properties_dict) or None if no camera selected.
+    """
+    cameras = enumerate_cameras()
+
+    if not cameras:
+        print("ERROR: No cameras found on this system.")
         return None
+
+    if len(cameras) == 1:
+        cam = cameras[0]
+        print(f"Found 1 camera: {cam['name']}")
+        return (cam["element"], cam["properties"])
+
+    print("\nAvailable cameras:")
+    for cam in cameras:
+        print(f"  [{cam['index']}] {cam['name']}")
+
+    while True:
+        try:
+            choice = input(
+                f"\nSelect camera [0-{len(cameras) - 1}] (default: 0): "
+            ).strip()
+            if choice == "":
+                idx = 0
+            else:
+                idx = int(choice)
+            if 0 <= idx < len(cameras):
+                cam = cameras[idx]
+                print(f"Selected: {cam['name']}")
+                return (cam["element"], cam["properties"])
+            else:
+                print(f"Invalid choice. Enter a number between 0 and {len(cameras) - 1}.")
+        except ValueError:
+            print("Invalid input. Enter a number.")
+        except (EOFError, KeyboardInterrupt):
+            print("\nCancelled.")
+            return None
+
+
+def get_camera_source():
+    """Get the appropriate camera source element by prompting the user."""
+    return prompt_camera_selection()
 
 
 def create_pipeline(
@@ -233,7 +363,7 @@ def create_pipeline(
     if use_camera:
         camera_info = get_camera_source()
         if camera_info is None:
-            print(f"ERROR: Camera not supported on {platform.system()}")
+            print(f"ERROR: No camera selected")
             return None
 
         element_name, properties = camera_info
