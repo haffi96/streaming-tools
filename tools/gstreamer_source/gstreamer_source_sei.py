@@ -408,24 +408,42 @@ def create_pipeline(
 
     # Caps filter for resolution and framerate
     capsfilter = Gst.ElementFactory.make("capsfilter", "caps")
-    if is_raw_nv12:
-        caps = Gst.Caps.from_string(
-            f"video/x-raw,format=NV12,width={width},height={height},framerate={fps}/1"
-        )
-    else:
-        caps = Gst.Caps.from_string(
-            f"video/x-raw,format=I420,width={width},height={height},framerate={fps}/1"
-        )
+    caps = Gst.Caps.from_string(
+        f"video/x-raw,format=NV12,width={width},height={height},framerate={fps}/1"
+    )
     capsfilter.set_property("caps", caps)
 
     if not is_raw_nv12:
         # Encoder
-        encoder = Gst.ElementFactory.make("x264enc", "encoder")
-        encoder.set_property("speed-preset", "ultrafast")
-        # encoder.set_property("tune", "zerolatency") # doesn't work with lk cli
-        encoder.set_property("key-int-max", fps)  # Keyframe every second
-        encoder.set_property("bframes", 0)
+        if platform.system() == "Darwin":
+            encoder = Gst.ElementFactory.make("vtenc_h264_hw", "encoder")
+            encoder_name = "vtenc_h264_hw"
+            if encoder is None:
+                encoder = Gst.ElementFactory.make("vtenc_h264", "encoder")
+                encoder_name = "vtenc_h264"
 
+            if encoder is None:
+                logging.error("Could not create a macOS VideoToolbox H.264 encoder")
+                return None
+
+
+            for prop, value in [
+                ("realtime", True),
+                ("allow-frame-reordering", False),
+                ("max-keyframe-interval", fps),
+            ]:
+                if encoder.find_property(prop):
+                    encoder.set_property(prop, value)
+        else:
+            encoder = Gst.ElementFactory.make("x264enc", "encoder")
+            encoder_name = "x264enc"
+            encoder.set_property("speed-preset", "ultrafast")
+            # encoder.set_property("tune", "zerolatency") # doesn't work with lk cli
+            encoder.set_property("key-int-max", fps)  # Keyframe every second
+            encoder.set_property("bframes", 0)
+
+        logging.info(f"Using encoder: {encoder_name}")
+        
         # H.264 parser
         parser = Gst.ElementFactory.make("h264parse", "parser")
         parser.set_property("config-interval", 1)  # Insert SPS/PPS frequently
@@ -433,12 +451,17 @@ def create_pipeline(
         # Output caps based on stream format
         output_caps = Gst.ElementFactory.make("capsfilter", "output-caps")
         output_caps_str = Gst.Caps.from_string(
-            f"video/x-h264,stream-format={stream_format}"
+            f"video/x-h264,stream-format={stream_format},alignment=au"
         )
         output_caps.set_property("caps", output_caps_str)
 
     # Queue
     queue = Gst.ElementFactory.make("queue", "queue")
+    for q in [queue]:
+        q.set_property("max-size-buffers", 4)
+        q.set_property("max-size-bytes", 0)
+        q.set_property("max-size-time", 0)
+        q.set_property("leaky", 2)
 
     # Sink
     if output_mode == "file":
@@ -510,7 +533,7 @@ def create_pipeline(
     if not is_raw_nv12:
         # Setup SEI injection on encoder output
         sei_injector = SeiInjector(stream_format)
-        src_pad = encoder.get_static_pad("src")
+        src_pad = output_caps.get_static_pad("src")
         if src_pad:
             sei_injector.probe_id = src_pad.add_probe(
                 Gst.PadProbeType.BUFFER, sei_injector.probe_callback
