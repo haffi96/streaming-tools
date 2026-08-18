@@ -1,11 +1,38 @@
-# livekit_publisher
+# livekit-publisher
+
+Build from source:
+
+Clone:
+
+```bash
+git clone git@gitlab.com:oxa_ua/pe/ro/ra/livekit-publisher.git
+cd livekit-publisher
+```
+
+Mac:
+
+```bash
+GOOS=darwin GOARCH=arm64 CGO_ENABLED=0 go build -ldflags "-w -s" -o bin/livekit-publisher ./cmd/publisher
+```
+
+Linux arm64:
+
+```bash
+GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -ldflags "-w -s" -o linux-arm-bin/livekit-publisher ./cmd/publisher
+```
+
+Linux amd64:
+
+```bash
+GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -ldflags "-w -s" -o linux-arm-bin/livekit-publisher ./cmd/publisher
+```
 
 Standalone Go CLI for publishing pre-encoded H.264/H.265 TCP streams into LiveKit.
 
 ## Usage
 
 ```bash
-go run ./cmd/livekit_publisher room join \
+go run ./cmd/publisher room join \
   --url wss://your-project.livekit.cloud \
   --api-key <key> \
   --api-secret <secret> \
@@ -20,7 +47,7 @@ go run ./cmd/livekit_publisher room join \
 Simulcast uses repeated `--publish` flags with the same logical name and explicit dimensions:
 
 ```bash
-go run ./cmd/livekit_publisher room join \
+go run ./cmd/publisher room join \
   --url wss://your-project.livekit.cloud \
   --api-key <key> \
   --api-secret <secret> \

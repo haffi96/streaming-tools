@@ -7,13 +7,16 @@ type SessionConfig struct {
 	APIKey              string
 	APISecret           string
 	Identity            string
+	Metadata			string
 	Room                string
 	FPS                 float64
 	H26xStreamingFormat string
+	AttachFrameMetadata bool
 	ExitAfterPublish    bool
-	ReconnectAttempts   int
-	ReconnectDelay      time.Duration
-	Targets             []PublishTarget
+	ReconnectAttempts      int
+	ReconnectDelay         time.Duration
+	DisableRegionDiscovery bool
+	Targets                []PublishTarget
 }
 
 type PublishTarget struct {

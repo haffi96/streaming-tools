@@ -68,7 +68,7 @@ func SetLogger() {
 			"pion": "error",
 		},
 	}
-	protologger.InitFromConfig(logConfig, "livekit_publisher")
+	protologger.InitFromConfig(logConfig, "livekit-publisher")
 	lksdk.SetLogger(protologger.GetLogger())
 }
 
@@ -100,12 +100,18 @@ func Run(ctx context.Context, cfg SessionConfig) error {
 		},
 	}
 
+	opts := []lksdk.ConnectOption{}
+	if cfg.DisableRegionDiscovery {
+		opts = append(opts, lksdk.WithDisableRegionDiscovery())
+	}
+
 	room, err := lksdk.ConnectToRoom(cfg.URL, lksdk.ConnectInfo{
 		APIKey:              cfg.APIKey,
 		APISecret:           cfg.APISecret,
 		RoomName:            cfg.Room,
 		ParticipantIdentity: cfg.Identity,
-	}, roomCB)
+		ParticipantMetadata: cfg.Metadata,
+	}, roomCB, opts...)
 	if err != nil {
 		return err
 	}
@@ -203,8 +209,8 @@ func runIndependentPublishAttempt(ctx context.Context, room *lksdk.Room, cfg Ses
 	options := &lksdk.TrackPublicationOptions{
 		Name:                target.Name,
 		Source:              livekit.TrackSource_CAMERA,
-		AttachUserTimestamp: true,
-		AttachFrameId:       true,
+		AttachUserTimestamp: cfg.AttachFrameMetadata,
+		AttachFrameId:       cfg.AttachFrameMetadata,
 	}
 	if target.HasDimensions() {
 		options.VideoWidth = int(target.Width)
@@ -286,8 +292,8 @@ func runSimulcastPublishAttempt(ctx context.Context, room *lksdk.Room, cfg Sessi
 	pub, err := room.LocalParticipant.PublishSimulcastTrack(tracks, &lksdk.TrackPublicationOptions{
 		Name:                group.Name,
 		Source:              livekit.TrackSource_CAMERA,
-		AttachUserTimestamp: true,
-		AttachFrameId:       true,
+		AttachUserTimestamp: cfg.AttachFrameMetadata,
+		AttachFrameId:       cfg.AttachFrameMetadata,
 	})
 	if err != nil {
 		closeClosers(conns)
@@ -310,7 +316,6 @@ func runSimulcastPublishAttempt(ctx context.Context, room *lksdk.Room, cfg Sessi
 
 func buildReaderTrack(in io.ReadCloser, codec string, cfg SessionConfig, onComplete func(), extraOpts ...lksdk.ReaderSampleProviderOption) (*lksdk.LocalTrack, error) {
 	opts := []lksdk.ReaderSampleProviderOption{
-		lksdk.ReaderTrackWithPacketTrailer(true),
 		lksdk.ReaderTrackWithOnWriteComplete(onComplete),
 		lksdk.ReaderTrackWithRTCPHandler(func(packet rtcp.Packet) {
 			switch packet.(type) {
@@ -323,6 +328,11 @@ func buildReaderTrack(in io.ReadCloser, codec string, cfg SessionConfig, onCompl
 		frameDuration := time.Second / time.Duration(cfg.FPS)
 		opts = append(opts, lksdk.ReaderTrackWithFrameDuration(frameDuration))
 	}
+
+	if cfg.AttachFrameMetadata {
+		opts = append(opts, lksdk.ReaderTrackWithPacketTrailer(true))
+	}
+	
 	switch cfg.H26xStreamingFormat {
 	case "annex-b":
 		opts = append(opts, lksdk.ReaderTrackWithH26xStreamingFormat(lksdk.H26xStreamingFormatAnnexB))
@@ -418,12 +428,15 @@ func LoadConfig(
 	apiKey string,
 	apiSecret string,
 	identity string,
+	metadata string,
 	room string,
 	fps float64,
 	format string,
+	attachFrameMetadata bool,
 	exitAfter bool,
 	reconnectAttempts int,
 	reconnectDelay time.Duration,
+	disableRegionDiscovery bool,
 	publishURLs []string,
 ) (SessionConfig, error) {
 	if url == "" {
@@ -456,12 +469,15 @@ func LoadConfig(
 		APIKey:              apiKey,
 		APISecret:           apiSecret,
 		Identity:            identity,
+		Metadata: metadata,	
 		Room:                room,
 		FPS:                 fps,
 		H26xStreamingFormat: format,
-		ExitAfterPublish:    exitAfter,
-		ReconnectAttempts:   reconnectAttempts,
-		ReconnectDelay:      reconnectDelay,
-		Targets:             targets,
+		AttachFrameMetadata: attachFrameMetadata,
+		ExitAfterPublish:       exitAfter,
+		ReconnectAttempts:      reconnectAttempts,
+		ReconnectDelay:         reconnectDelay,
+		DisableRegionDiscovery: disableRegionDiscovery,
+		Targets:                targets,
 	}, nil
 }

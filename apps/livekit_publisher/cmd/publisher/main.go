@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"os"
 
-	appcli "livekit_publisher/internal/cli"
+	appcli "livekit-publisher/internal/cli"
 )
 
 func main() {
