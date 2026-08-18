@@ -2,7 +2,7 @@
 """Receive a TCP H.264 stream, display it, and surface SEI timestamp metadata.
 
 Usage:
-    # Display stream with publish timestamp overlay
+    # Display AVC stream with publish timestamp overlay
     uv run python gstreamer_receive_sei.py --host localhost --port 5004
 
     # Headless metadata-only mode
@@ -10,10 +10,15 @@ Usage:
 """
 
 import argparse
+import ctypes
+import ctypes.util
 import logging
+import platform
+import signal
 import sys
 import time
 from datetime import datetime, timezone
+from pathlib import Path
 
 import gi
 
@@ -21,6 +26,10 @@ gi.require_version("Gst", "1.0")
 from gi.repository import GLib, Gst
 
 from parse_h264_sei import parse_packet_trailer, parse_user_data
+
+
+_MACOS_MAIN_CALLBACK = None
+_MACOS_MAIN_FUNC = None
 
 
 logging.basicConfig(
@@ -113,11 +122,80 @@ def format_metadata_line(metadata: dict[str, int | str]) -> str:
     )
 
 
+def make_video_sink() -> Gst.Element | None:
+    if platform.system() == "Darwin":
+        sink = Gst.ElementFactory.make("osxvideosink", "sink")
+        if sink is not None:
+            return sink
+
+    return Gst.ElementFactory.make("autovideosink", "sink")
+
+
+def run_with_macos_main(func) -> int:
+    """Run func through gst_macos_main_simple so video sinks get a Cocoa loop."""
+    global _MACOS_MAIN_CALLBACK, _MACOS_MAIN_FUNC
+
+    library_path = find_gstreamer_library()
+    if library_path is None:
+        logging.error("Could not find libgstreamer-1.0 for gst_macos_main_simple")
+        return 1
+
+    gstreamer = ctypes.CDLL(library_path)
+    callback_type = ctypes.CFUNCTYPE(ctypes.c_int, ctypes.c_void_p)
+    gstreamer.gst_macos_main_simple.argtypes = [callback_type, ctypes.c_void_p]
+    gstreamer.gst_macos_main_simple.restype = ctypes.c_int
+
+    _MACOS_MAIN_FUNC = func
+
+    def callback(_user_data):
+        try:
+            return int(_MACOS_MAIN_FUNC())
+        except KeyboardInterrupt:
+            logging.info("Interrupted")
+            return 0
+        except Exception:
+            logging.exception("Unhandled receiver error")
+            return 1
+
+    _MACOS_MAIN_CALLBACK = callback_type(callback)
+    return int(gstreamer.gst_macos_main_simple(_MACOS_MAIN_CALLBACK, None))
+
+
+def find_gstreamer_library() -> str | None:
+    library_path = ctypes.util.find_library("gstreamer-1.0")
+    if library_path is not None:
+        return library_path
+
+    for path in [
+        "/opt/homebrew/lib/libgstreamer-1.0.dylib",
+        "/usr/local/lib/libgstreamer-1.0.dylib",
+    ]:
+        if Path(path).exists():
+            return path
+
+    return None
+
+
 class SeiReceiver:
-    def __init__(self, host: str, port: int, headless: bool):
+    def __init__(
+        self,
+        host: str,
+        port: int,
+        headless: bool,
+        stream_format: str,
+        transport: str,
+        width: int,
+        height: int,
+        fps: int,
+    ):
         self.host = host
         self.port = port
         self.headless = headless
+        self.stream_format = stream_format
+        self.transport = transport
+        self.width = width
+        self.height = height
+        self.fps = fps
         self.pipeline: Gst.Pipeline | None = None
         self.overlay: Gst.Element | None = None
 
@@ -125,21 +203,30 @@ class SeiReceiver:
         pipeline = Gst.Pipeline.new("sei-receiver-pipeline")
 
         src = Gst.ElementFactory.make("tcpclientsrc", "source")
-        input_caps = Gst.ElementFactory.make("capsfilter", "input-caps")
+        depay = Gst.ElementFactory.make("gdpdepay", "gdp-depay") if self.transport == "gdp" else None
+        input_caps = (
+            Gst.ElementFactory.make("capsfilter", "input-caps")
+            if self.transport == "raw"
+            else None
+        )
         parser = Gst.ElementFactory.make("h264parse", "parser")
         parsed_caps = Gst.ElementFactory.make("capsfilter", "parsed-caps")
         tee = Gst.ElementFactory.make("tee", "tee")
         metadata_queue = Gst.ElementFactory.make("queue", "metadata-queue")
         appsink = Gst.ElementFactory.make("appsink", "metadata-sink")
 
-        elements = [src, input_caps, parser, parsed_caps, tee, metadata_queue, appsink]
+        elements = [src, parser, parsed_caps, tee, metadata_queue, appsink]
+        if depay is not None:
+            elements.append(depay)
+        if input_caps is not None:
+            elements.append(input_caps)
 
         if not self.headless:
             video_queue = Gst.ElementFactory.make("queue", "video-queue")
             decoder = Gst.ElementFactory.make("avdec_h264", "decoder")
             videoconvert = Gst.ElementFactory.make("videoconvert", "convert")
             overlay = Gst.ElementFactory.make("textoverlay", "overlay")
-            sink = Gst.ElementFactory.make("autovideosink", "sink")
+            sink = make_video_sink()
             elements.extend([video_queue, decoder, videoconvert, overlay, sink])
         else:
             video_queue = decoder = videoconvert = overlay = sink = None
@@ -151,9 +238,12 @@ class SeiReceiver:
 
         src.set_property("host", self.host)
         src.set_property("port", self.port)
-        input_caps.set_property(
-            "caps", Gst.Caps.from_string("video/x-h264,stream-format=avc,alignment=au")
-        )
+        if input_caps is not None:
+            input_caps_str = (
+                f"video/x-h264,stream-format={self.stream_format},alignment=au,"
+                f"width={self.width},height={self.height},framerate={self.fps}/1"
+            )
+            input_caps.set_property("caps", Gst.Caps.from_string(input_caps_str))
         parsed_caps.set_property(
             "caps", Gst.Caps.from_string("video/x-h264,stream-format=avc,alignment=au")
         )
@@ -178,12 +268,20 @@ class SeiReceiver:
         for element in elements:
             pipeline.add(element)
 
-        if not src.link(input_caps):
-            logging.error("Failed to link source to capsfilter")
-            return None
-        if not input_caps.link(parser):
-            logging.error("Failed to link capsfilter to h264parse")
-            return None
+        if depay is not None:
+            if not src.link(depay):
+                logging.error("Failed to link source to GDP depayloader")
+                return None
+            if not depay.link(parser):
+                logging.error("Failed to link GDP depayloader to h264parse")
+                return None
+        elif input_caps is not None:
+            if not src.link(input_caps):
+                logging.error("Failed to link source to capsfilter")
+                return None
+            if not input_caps.link(parser):
+                logging.error("Failed to link capsfilter to h264parse")
+                return None
         if not parser.link(parsed_caps):
             logging.error("Failed to link h264parse to parsed capsfilter")
             return None
@@ -241,7 +339,7 @@ class SeiReceiver:
             if self.headless:
                 print(line, flush=True)
             elif self.overlay is not None:
-                GLib.idle_add(self.overlay.set_property, "text", line)
+                self.overlay.set_property("text", line)
 
         return Gst.FlowReturn.OK
 
@@ -265,8 +363,18 @@ class SeiReceiver:
                 loop.quit()
 
         bus.connect("message", on_message)
+        if hasattr(GLib, "unix_signal_add"):
+            GLib.unix_signal_add(
+                GLib.PRIORITY_DEFAULT,
+                signal.SIGINT,
+                lambda: (logging.info("Interrupted"), loop.quit(), False)[2],
+            )
 
-        logging.info(f"Connecting to {self.host}:{self.port} (AVC H.264)")
+        logging.info(
+            f"Connecting to {self.host}:{self.port} "
+            f"({self.stream_format} H.264 over {self.transport}, "
+            f"{self.width}x{self.height}@{self.fps})"
+        )
         pipeline.set_state(Gst.State.PLAYING)
 
         try:
@@ -279,12 +387,45 @@ class SeiReceiver:
         return 0
 
 
+def run_receiver(args: argparse.Namespace) -> int:
+    Gst.init(None)
+    transport = args.transport
+    if transport == "auto":
+        transport = "gdp" if args.stream_format == "avc" else "raw"
+
+    return SeiReceiver(
+        args.host,
+        args.port,
+        args.headless,
+        args.stream_format,
+        transport,
+        args.width,
+        args.height,
+        args.fps,
+    ).run()
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Receive a TCP AVC H.264 stream and display SEI publish timestamps"
+        description="Receive a TCP H.264 stream and display SEI publish timestamps"
     )
     parser.add_argument("--host", default="localhost", help="TCP server host")
     parser.add_argument("--port", type=int, default=5004, help="TCP server port")
+    parser.add_argument(
+        "--stream-format",
+        choices=["avc", "byte-stream"],
+        default="avc",
+        help="Input H.264 stream format (default: avc)",
+    )
+    parser.add_argument(
+        "--transport",
+        choices=["auto", "gdp", "raw"],
+        default="auto",
+        help="TCP transport wrapper: 'gdp' preserves AVC caps; 'raw' sends bytes only",
+    )
+    parser.add_argument("--width", type=int, default=1280, help="Frame width")
+    parser.add_argument("--height", type=int, default=720, help="Frame height")
+    parser.add_argument("--fps", type=int, default=30, help="Frames per second")
     parser.add_argument(
         "--headless",
         action="store_true",
@@ -292,8 +433,10 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    Gst.init(None)
-    return SeiReceiver(args.host, args.port, args.headless).run()
+    if platform.system() == "Darwin" and not args.headless:
+        return run_with_macos_main(lambda: run_receiver(args))
+
+    return run_receiver(args)
 
 
 if __name__ == "__main__":

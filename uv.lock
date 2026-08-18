@@ -961,6 +961,9 @@ wheels = [
 name = "streaming-tools"
 version = "0.1.0"
 source = { virtual = "." }
+dependencies = [
+    { name = "pygobject" },
+]
 
 [package.dev-dependencies]
 dev = [
@@ -968,6 +971,7 @@ dev = [
 ]
 
 [package.metadata]
+requires-dist = [{ name = "pygobject", specifier = "<3.52" }]
 
 [package.metadata.requires-dev]
 dev = [{ name = "ruff", specifier = ">=0.14.14" }]
