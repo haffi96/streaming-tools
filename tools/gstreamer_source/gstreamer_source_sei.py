@@ -346,6 +346,7 @@ def create_pipeline(
     height: int,
     duration: int | None,
     stream_format: str = "byte-stream",
+    transport: str = "auto",
 ) -> tuple[Gst.Pipeline, SeiInjector | None] | None:
     """Create GStreamer pipeline for H.264 stream with SEI metadata or raw NV12.
 
@@ -359,6 +360,7 @@ def create_pipeline(
         height: Frame height
         duration: Duration in seconds (file mode only)
         stream_format: 'byte-stream' for Annex B or 'avc' for length-prefixed
+        transport: 'raw' to write encoded bytes directly or 'gdp' to preserve caps
 
     Returns:
         Tuple of (pipeline, sei_injector) or None on failure.
@@ -366,6 +368,9 @@ def create_pipeline(
     pipeline = Gst.Pipeline.new("sei-timestamp-pipeline")
 
     is_raw_nv12 = output_mode == "raw-nv12"
+    tcp_transport = transport
+    if tcp_transport == "auto":
+        tcp_transport = "gdp" if output_mode == "tcp" and stream_format == "avc" else "raw"
 
     # Source
     if use_camera:
@@ -454,6 +459,13 @@ def create_pipeline(
             f"video/x-h264,stream-format={stream_format},alignment=au"
         )
         output_caps.set_property("caps", output_caps_str)
+        gdp_pay = (
+            Gst.ElementFactory.make("gdppay", "gdp-pay")
+            if output_mode == "tcp" and tcp_transport == "gdp"
+            else None
+        )
+    else:
+        gdp_pay = None
 
     # Queue
     queue = Gst.ElementFactory.make("queue", "queue")
@@ -476,13 +488,15 @@ def create_pipeline(
         if is_raw_nv12:
             logging.info(f"Output: TCP port {port} (raw NV12)")
         else:
-            logging.info(f"Output: TCP port {port}")
+            logging.info(f"Output: TCP port {port} ({tcp_transport})")
 
     # Check all elements created
     if is_raw_nv12:
         elements = [src, capsfilter, queue, sink]
     else:
         elements = [src, capsfilter, encoder, parser, output_caps, queue, sink]
+        if gdp_pay is not None:
+            elements.append(gdp_pay)
     if use_camera:
         elements.extend([videoconvert, videorate, videoscale])
     elif is_raw_nv12:
@@ -507,6 +521,8 @@ def create_pipeline(
         pipeline.add(encoder)
         pipeline.add(parser)
         pipeline.add(output_caps)
+        if gdp_pay is not None:
+            pipeline.add(gdp_pay)
     pipeline.add(queue)
     pipeline.add(sink)
 
@@ -526,7 +542,11 @@ def create_pipeline(
         capsfilter.link(encoder)
         encoder.link(parser)
         parser.link(output_caps)
-        output_caps.link(queue)
+        if gdp_pay is not None:
+            output_caps.link(gdp_pay)
+            gdp_pay.link(queue)
+        else:
+            output_caps.link(queue)
         queue.link(sink)
 
     sei_injector = None
@@ -602,6 +622,12 @@ def main():
         default="byte-stream",
         help="H.264 stream format: 'byte-stream' (Annex B) or 'avc' (length-prefixed)",
     )
+    parser.add_argument(
+        "--transport",
+        choices=["auto", "raw", "gdp"],
+        default="auto",
+        help="TCP transport wrapper: 'gdp' preserves AVC caps; 'raw' sends bytes only",
+    )
 
     args = parser.parse_args()
 
@@ -619,6 +645,7 @@ def main():
         height=args.height,
         duration=args.duration if args.output == "file" else None,
         stream_format=args.stream_format,
+        transport=args.transport,
     )
 
     if result is None:

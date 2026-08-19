@@ -27,6 +27,22 @@ Usage:
     uv run python parse_h264_sei.py --tcp --host localhost --port 5004
 ```
 
+Receive and display AVC H.264 stream:
+
+Usage:
+
+```bash
+    # Start a publisher in AVC format.
+    # AVC over TCP uses GDP automatically so codec caps are preserved.
+    uv run python gstreamer_source_sei.py --output tcp --port 5004 --stream-format avc
+
+    # Display the stream with SEI publish timestamp overlay
+    uv run python gstreamer_receive_sei.py --host localhost --port 5004
+
+    # Headless mode: print frame ID and SEI timestamp metadata
+    uv run python gstreamer_receive_sei.py --host localhost --port 5004 --headless
+```
+
 View the stream or file:
 
 ```bash
@@ -39,7 +55,4 @@ Pre-requisites:
 - Gstream plugins
 - Python 3.10+
 - [uv (optional)](https://docs.astral.sh/uv/getting-started/installation/), can also just run with pip and a venv
-
-
-
 
