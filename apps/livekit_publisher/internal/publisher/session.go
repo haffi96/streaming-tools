@@ -13,6 +13,8 @@ import (
 	"syscall"
 	"time"
 
+	apptelemetry "livekit-publisher/internal/telemetry"
+
 	"github.com/livekit/protocol/livekit"
 	protologger "github.com/livekit/protocol/logger"
 	"github.com/pion/rtcp"
@@ -86,7 +88,16 @@ func Run(ctx context.Context, cfg SessionConfig) error {
 	}
 
 	runCtx, cancel := context.WithCancel(ctx)
-	defer cancel()
+	telemetry, err := apptelemetry.New(runCtx)
+	if err != nil {
+		return fmt.Errorf("initialize telemetry: %w", err)
+	}
+	defer func() {
+		cancel()
+		if err := telemetry.Shutdown(context.Background()); err != nil {
+			log.Printf("failed to flush telemetry: %v", err)
+		}
+	}()
 
 	state := newSessionState(cfg.ExitAfterPublish, groups)
 
@@ -116,12 +127,13 @@ func Run(ctx context.Context, cfg SessionConfig) error {
 		return err
 	}
 	defer room.Disconnect()
+	go monitorPublisherICE(runCtx, room, telemetry)
 
 	log.Printf("connected to room=%s identity=%s", room.Name(), cfg.Identity)
 
 	for _, group := range groups {
 		group := group
-		go runPublishGroupManager(runCtx, room, cfg, group, state)
+		go runPublishGroupManager(runCtx, room, cfg, group, state, telemetry)
 	}
 
 	sigCtx, stop := signal.NotifyContext(runCtx, syscall.SIGINT, syscall.SIGTERM, syscall.SIGQUIT)
@@ -135,7 +147,7 @@ func Run(ctx context.Context, cfg SessionConfig) error {
 	}
 }
 
-func runPublishGroupManager(ctx context.Context, room *lksdk.Room, cfg SessionConfig, group PublishGroup, state *sessionState) {
+func runPublishGroupManager(ctx context.Context, room *lksdk.Room, cfg SessionConfig, group PublishGroup, state *sessionState, telemetry *apptelemetry.Manager) {
 	attempt := 0
 
 	for {
@@ -148,7 +160,7 @@ func runPublishGroupManager(ctx context.Context, room *lksdk.Room, cfg SessionCo
 		case PublishGroupIndependent:
 			target := group.Targets[0]
 			log.Printf("publish manager attempt=%d track=%s address=%s", attempt, target.Name, target.Address)
-			reconnect, err := runIndependentPublishAttempt(ctx, room, cfg, target)
+			reconnect, err := runIndependentPublishAttempt(ctx, room, cfg, target, telemetry)
 			if err != nil {
 				log.Printf("publish manager failed track=%s attempt=%d: %v", target.Name, attempt, err)
 			} else if !reconnect {
@@ -157,7 +169,7 @@ func runPublishGroupManager(ctx context.Context, room *lksdk.Room, cfg SessionCo
 			}
 		case PublishGroupSimulcast:
 			log.Printf("publish manager attempt=%d simulcast=%s layers=%d", attempt, group.Name, len(group.Targets))
-			reconnect, err := runSimulcastPublishAttempt(ctx, room, cfg, group)
+			reconnect, err := runSimulcastPublishAttempt(ctx, room, cfg, group, telemetry)
 			if err != nil {
 				log.Printf("publish manager failed simulcast=%s attempt=%d: %v", group.Name, attempt, err)
 			} else if !reconnect {
@@ -185,7 +197,7 @@ func runPublishGroupManager(ctx context.Context, room *lksdk.Room, cfg SessionCo
 	}
 }
 
-func runIndependentPublishAttempt(ctx context.Context, room *lksdk.Room, cfg SessionConfig, target PublishTarget) (bool, error) {
+func runIndependentPublishAttempt(ctx context.Context, room *lksdk.Room, cfg SessionConfig, target PublishTarget, telemetry *apptelemetry.Manager) (bool, error) {
 	conn, err := net.Dial(target.Network, target.Address)
 	if err != nil {
 		return true, fmt.Errorf("failed to connect %s to %s: %w", target.Name, target.Address, err)
@@ -200,7 +212,9 @@ func runIndependentPublishAttempt(ctx context.Context, room *lksdk.Room, cfg Ses
 	}
 
 	var pub *lksdk.LocalTrackPublication
-	track, err := buildReaderTrack(conn, target.Codec, cfg, notifyDone)
+	observer := telemetry.NewTrackObserver(apptelemetry.TrackConfig{Name: target.Name, Codec: target.Codec, Room: cfg.Room, Identity: cfg.Identity})
+	defer apptelemetry.CloseTrackObserver(observer)
+	track, err := buildReaderTrack(conn, target.Codec, cfg, notifyDone, observer)
 	if err != nil {
 		_ = conn.Close()
 		return false, err
@@ -236,7 +250,7 @@ func runIndependentPublishAttempt(ctx context.Context, room *lksdk.Room, cfg Ses
 	}
 }
 
-func runSimulcastPublishAttempt(ctx context.Context, room *lksdk.Room, cfg SessionConfig, group PublishGroup) (bool, error) {
+func runSimulcastPublishAttempt(ctx context.Context, room *lksdk.Room, cfg SessionConfig, group PublishGroup, telemetry *apptelemetry.Manager) (bool, error) {
 	qualities := []livekit.VideoQuality{
 		livekit.VideoQuality_LOW,
 		livekit.VideoQuality_HIGH,
@@ -259,6 +273,12 @@ func runSimulcastPublishAttempt(ctx context.Context, room *lksdk.Room, cfg Sessi
 
 	tracks := make([]*lksdk.LocalTrack, 0, len(group.Targets))
 	conns := make([]io.Closer, 0, len(group.Targets))
+	observers := make([]lksdk.SampleObserver, 0, len(group.Targets))
+	defer func() {
+		for _, observer := range observers {
+			apptelemetry.CloseTrackObserver(observer)
+		}
+	}()
 	for idx, target := range group.Targets {
 		conn, err := net.Dial(target.Network, target.Address)
 		if err != nil {
@@ -273,11 +293,14 @@ func runSimulcastPublishAttempt(ctx context.Context, room *lksdk.Room, cfg Sessi
 			Width:   target.Width,
 			Height:  target.Height,
 		}
+		observer := telemetry.NewTrackObserver(apptelemetry.TrackConfig{Name: group.Name, Codec: target.Codec, Room: cfg.Room, Identity: cfg.Identity, VideoQuality: qualityName(qualities[idx])})
+		observers = append(observers, observer)
 		track, err := buildReaderTrack(
 			conn,
 			target.Codec,
 			cfg,
 			notifyDone,
+			observer,
 			lksdk.ReaderTrackWithSampleOptions(lksdk.WithSimulcast(group.Name, layer)),
 		)
 		if err != nil {
@@ -314,7 +337,7 @@ func runSimulcastPublishAttempt(ctx context.Context, room *lksdk.Room, cfg Sessi
 	}
 }
 
-func buildReaderTrack(in io.ReadCloser, codec string, cfg SessionConfig, onComplete func(), extraOpts ...lksdk.ReaderSampleProviderOption) (*lksdk.LocalTrack, error) {
+func buildReaderTrack(in io.ReadCloser, codec string, cfg SessionConfig, onComplete func(), observer lksdk.SampleObserver, extraOpts ...lksdk.ReaderSampleProviderOption) (*lksdk.LocalTrack, error) {
 	opts := []lksdk.ReaderSampleProviderOption{
 		lksdk.ReaderTrackWithOnWriteComplete(onComplete),
 		lksdk.ReaderTrackWithRTCPHandler(func(packet rtcp.Packet) {
@@ -324,6 +347,9 @@ func buildReaderTrack(in io.ReadCloser, codec string, cfg SessionConfig, onCompl
 			}
 		}),
 	}
+	if observer != nil {
+		opts = append(opts, lksdk.ReaderTrackWithSampleObserver(observer))
+	}
 	if cfg.FPS > 0 {
 		frameDuration := time.Second / time.Duration(cfg.FPS)
 		opts = append(opts, lksdk.ReaderTrackWithFrameDuration(frameDuration))
@@ -332,7 +358,7 @@ func buildReaderTrack(in io.ReadCloser, codec string, cfg SessionConfig, onCompl
 	if cfg.AttachFrameMetadata {
 		opts = append(opts, lksdk.ReaderTrackWithPacketTrailer(true))
 	}
-	
+
 	switch cfg.H26xStreamingFormat {
 	case "annex-b":
 		opts = append(opts, lksdk.ReaderTrackWithH26xStreamingFormat(lksdk.H26xStreamingFormatAnnexB))
@@ -343,6 +369,41 @@ func buildReaderTrack(in io.ReadCloser, codec string, cfg SessionConfig, onCompl
 	}
 	opts = append(opts, extraOpts...)
 	return lksdk.NewLocalReaderTrack(in, mimeTypeForCodec(codec), opts...)
+}
+
+func qualityName(quality livekit.VideoQuality) string {
+	switch quality {
+	case livekit.VideoQuality_LOW:
+		return "low"
+	case livekit.VideoQuality_MEDIUM:
+		return "medium"
+	case livekit.VideoQuality_HIGH:
+		return "high"
+	default:
+		return "unknown"
+	}
+}
+
+func monitorPublisherICE(ctx context.Context, room *lksdk.Room, telemetry *apptelemetry.Manager) {
+	if !telemetry.Enabled() {
+		return
+	}
+	ticker := time.NewTicker(time.Second)
+	defer ticker.Stop()
+	defer telemetry.ClearICE()
+	for {
+		pair, err := apptelemetry.SelectedICEPair(room.LocalParticipant.GetPublisherPeerConnection())
+		if err == nil && pair != nil {
+			telemetry.SetICEPair(pair)
+		} else {
+			telemetry.ClearICE()
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+	}
 }
 
 func mimeTypeForCodec(codec string) string {
@@ -465,15 +526,15 @@ func LoadConfig(
 	}
 
 	return SessionConfig{
-		URL:                 url,
-		APIKey:              apiKey,
-		APISecret:           apiSecret,
-		Identity:            identity,
-		Metadata: metadata,	
-		Room:                room,
-		FPS:                 fps,
-		H26xStreamingFormat: format,
-		AttachFrameMetadata: attachFrameMetadata,
+		URL:                    url,
+		APIKey:                 apiKey,
+		APISecret:              apiSecret,
+		Identity:               identity,
+		Metadata:               metadata,
+		Room:                   room,
+		FPS:                    fps,
+		H26xStreamingFormat:    format,
+		AttachFrameMetadata:    attachFrameMetadata,
 		ExitAfterPublish:       exitAfter,
 		ReconnectAttempts:      reconnectAttempts,
 		ReconnectDelay:         reconnectDelay,
