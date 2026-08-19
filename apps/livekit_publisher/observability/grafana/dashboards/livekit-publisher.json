@@ -1,0 +1,109 @@
+{
+  "annotations": {"list": []},
+  "editable": true,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "panels": [
+    {
+      "title": "TCP frames consumed (FPS)", "type": "timeseries", "id": 1,
+      "gridPos": {"h": 8, "w": 8, "x": 0, "y": 0},
+      "targets": [{"expr": "sum by (track_name, video_quality) (rate({__name__=~\"livekit_publisher_frames_consumed.*total\",room=~\"$room\",participant_identity=~\"$identity\",track_name=~\"$track\",codec=~\"$codec\",video_quality=~\"$quality\"}[30s]))", "legendFormat": "{{track_name}} {{video_quality}}"}],
+      "fieldConfig": {"defaults": {"unit": "fps"}, "overrides": []}
+    },
+    {
+      "title": "Frames published (FPS)", "type": "timeseries", "id": 2,
+      "gridPos": {"h": 8, "w": 8, "x": 8, "y": 0},
+      "targets": [{"expr": "sum by (track_name, video_quality) (rate({__name__=~\"livekit_publisher_frames_published.*total\",room=~\"$room\",participant_identity=~\"$identity\",track_name=~\"$track\",codec=~\"$codec\",video_quality=~\"$quality\"}[30s]))", "legendFormat": "{{track_name}} {{video_quality}}"}],
+      "fieldConfig": {"defaults": {"unit": "fps"}, "overrides": []}
+    },
+    {
+      "title": "Track health", "type": "stat", "id": 3,
+      "gridPos": {"h": 8, "w": 8, "x": 16, "y": 0},
+      "targets": [{"expr": "sum by (track_name) (rate({__name__=~\"livekit_publisher_frames_published.*total\",room=~\"$room\",participant_identity=~\"$identity\",track_name=~\"$track\"}[30s]))", "legendFormat": "{{track_name}}"}],
+      "fieldConfig": {"defaults": {"unit": "fps", "thresholds": {"mode": "absolute", "steps": [{"color": "red", "value": null}, {"color": "green", "value": 1}]}}, "overrides": []}
+    },
+    {
+      "title": "Consumed vs published FPS", "type": "timeseries", "id": 4,
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 8},
+      "targets": [
+        {"expr": "sum(rate({__name__=~\"livekit_publisher_frames_consumed.*total\",room=~\"$room\",participant_identity=~\"$identity\",track_name=~\"$track\"}[30s]))", "legendFormat": "consumed"},
+        {"expr": "sum(rate({__name__=~\"livekit_publisher_frames_published.*total\",room=~\"$room\",participant_identity=~\"$identity\",track_name=~\"$track\"}[30s]))", "legendFormat": "published"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "fps"}, "overrides": []}
+    },
+    {
+      "title": "Frame size quantiles", "type": "timeseries", "id": 5,
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 8},
+      "targets": [
+        {"expr": "histogram_quantile(0.50, sum by (le, track_name) (rate({__name__=~\"livekit_publisher_frame_size.*bucket\",room=~\"$room\",track_name=~\"$track\"}[30s])))", "legendFormat": "p50 {{track_name}}"},
+        {"expr": "histogram_quantile(0.95, sum by (le, track_name) (rate({__name__=~\"livekit_publisher_frame_size.*bucket\",room=~\"$room\",track_name=~\"$track\"}[30s])))", "legendFormat": "p95 {{track_name}}"},
+        {"expr": "histogram_quantile(0.99, sum by (le, track_name) (rate({__name__=~\"livekit_publisher_frame_size.*bucket\",room=~\"$room\",track_name=~\"$track\"}[30s])))", "legendFormat": "p99 {{track_name}}"},
+        {"expr": "sum by (track_name) (rate({__name__=~\"livekit_publisher_frame_size.*sum\",room=~\"$room\",track_name=~\"$track\"}[30s])) / sum by (track_name) (rate({__name__=~\"livekit_publisher_frame_size.*count\",room=~\"$room\",track_name=~\"$track\"}[30s]))", "legendFormat": "avg {{track_name}}"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "bytes"}, "overrides": []}
+    },
+    {
+      "title": "Consume to publish latency", "type": "timeseries", "id": 6,
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 16},
+      "targets": [
+        {"expr": "histogram_quantile(0.50, sum by (le, track_name) (rate({__name__=~\"livekit_publisher_frame_consume_to_publish.*bucket\",room=~\"$room\",track_name=~\"$track\"}[30s])))", "legendFormat": "p50 {{track_name}}"},
+        {"expr": "histogram_quantile(0.95, sum by (le, track_name) (rate({__name__=~\"livekit_publisher_frame_consume_to_publish.*bucket\",room=~\"$room\",track_name=~\"$track\"}[30s])))", "legendFormat": "p95 {{track_name}}"},
+        {"expr": "histogram_quantile(0.99, sum by (le, track_name) (rate({__name__=~\"livekit_publisher_frame_consume_to_publish.*bucket\",room=~\"$room\",track_name=~\"$track\"}[30s])))", "legendFormat": "p99 {{track_name}}"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "s"}, "overrides": []}
+    },
+    {
+      "title": "WriteSample duration", "type": "timeseries", "id": 7,
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 16},
+      "targets": [
+        {"expr": "histogram_quantile(0.50, sum by (le, track_name) (rate({__name__=~\"livekit_publisher_frame_publish_duration.*bucket\",room=~\"$room\",track_name=~\"$track\"}[30s])))", "legendFormat": "p50 {{track_name}}"},
+        {"expr": "histogram_quantile(0.95, sum by (le, track_name) (rate({__name__=~\"livekit_publisher_frame_publish_duration.*bucket\",room=~\"$room\",track_name=~\"$track\"}[30s])))", "legendFormat": "p95 {{track_name}}"},
+        {"expr": "histogram_quantile(0.99, sum by (le, track_name) (rate({__name__=~\"livekit_publisher_frame_publish_duration.*bucket\",room=~\"$room\",track_name=~\"$track\"}[30s])))", "legendFormat": "p99 {{track_name}}"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "s"}, "overrides": []}
+    },
+    {
+      "title": "Current schedule lag", "type": "timeseries", "id": 8,
+      "gridPos": {"h": 8, "w": 8, "x": 0, "y": 24},
+      "targets": [{"expr": "{__name__=~\"livekit_publisher_backlog_current_lag.*\",room=~\"$room\",track_name=~\"$track\"}", "legendFormat": "{{track_name}} {{video_quality}}"}],
+      "fieldConfig": {"defaults": {"unit": "s"}, "overrides": []}
+    },
+    {
+      "title": "Backlog events", "type": "timeseries", "id": 9,
+      "gridPos": {"h": 8, "w": 8, "x": 8, "y": 24},
+      "targets": [{"expr": "sum by (track_name) (rate({__name__=~\"livekit_publisher_backlog_events.*total\",room=~\"$room\",track_name=~\"$track\"}[30s]))", "legendFormat": "{{track_name}}"}],
+      "fieldConfig": {"defaults": {"unit": "ops"}, "overrides": []}
+    },
+    {
+      "title": "Publish errors", "type": "timeseries", "id": 10,
+      "gridPos": {"h": 8, "w": 8, "x": 16, "y": 24},
+      "targets": [{"expr": "sum by (track_name) (rate({__name__=~\"livekit_publisher_frames_publish_errors.*total\",room=~\"$room\",track_name=~\"$track\"}[30s]))", "legendFormat": "{{track_name}}"}],
+      "fieldConfig": {"defaults": {"unit": "errors/sec"}, "overrides": []}
+    },
+    {
+      "title": "Publisher ICE path", "type": "table", "id": 11,
+      "gridPos": {"h": 7, "w": 24, "x": 0, "y": 32},
+      "targets": [{"expr": "{__name__=~\"livekit_publisher_ice_connection.*\"}", "format": "table", "instant": true}],
+      "transformations": [{"id": "organize", "options": {"excludeByName": {"Time": true, "__name__": true, "instance": true, "job": true}, "renameByName": {"connection_type": "Connection", "network_protocol": "Protocol", "local_candidate_type": "Local candidate", "remote_candidate_type": "Remote candidate"}}}],
+      "fieldConfig": {"defaults": {}, "overrides": []}
+    }
+  ],
+  "refresh": "5s",
+  "schemaVersion": 41,
+  "tags": ["livekit", "otel"],
+  "templating": {
+    "list": [
+      {"name": "room", "label": "Room", "type": "query", "datasource": {"type": "prometheus", "uid": "prometheus"}, "query": {"query": "label_values({__name__=~\"livekit_publisher_frames_consumed.*\"}, room)", "refId": "room"}, "includeAll": true, "allValue": ".*", "current": {"text": "All", "value": ".*"}},
+      {"name": "identity", "label": "Identity", "type": "query", "datasource": {"type": "prometheus", "uid": "prometheus"}, "query": {"query": "label_values({__name__=~\"livekit_publisher_frames_consumed.*\",room=~\"$room\"}, participant_identity)", "refId": "identity"}, "includeAll": true, "allValue": ".*", "current": {"text": "All", "value": ".*"}},
+      {"name": "track", "label": "Track", "type": "query", "datasource": {"type": "prometheus", "uid": "prometheus"}, "query": {"query": "label_values({__name__=~\"livekit_publisher_frames_consumed.*\",room=~\"$room\"}, track_name)", "refId": "track"}, "includeAll": true, "allValue": ".*", "current": {"text": "All", "value": ".*"}},
+      {"name": "codec", "label": "Codec", "type": "query", "datasource": {"type": "prometheus", "uid": "prometheus"}, "query": {"query": "label_values({__name__=~\"livekit_publisher_frames_consumed.*\"}, codec)", "refId": "codec"}, "includeAll": true, "allValue": ".*", "current": {"text": "All", "value": ".*"}},
+      {"name": "quality", "label": "Quality", "type": "query", "datasource": {"type": "prometheus", "uid": "prometheus"}, "query": {"query": "label_values({__name__=~\"livekit_publisher_frames_consumed.*\"}, video_quality)", "refId": "quality"}, "includeAll": true, "allValue": ".*", "current": {"text": "All", "value": ".*"}}
+    ]
+  },
+  "time": {"from": "now-15m", "to": "now"},
+  "timezone": "browser",
+  "title": "LiveKit Publisher",
+  "uid": "livekit-publisher",
+  "version": 1
+}
