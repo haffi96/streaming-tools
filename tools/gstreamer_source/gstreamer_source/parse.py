@@ -5,6 +5,12 @@ so a stream can be verified even when it carries no SEI metadata. With
 --sei-detection the gstreamer-source SEI (UUID 3fa85f6457174562b3fc2c963f66afa6,
 LKTS packet trailer or legacy 8-byte timestamp) is decoded as well and each
 frame line gains the embedded timestamp (file) or end-to-end latency (TCP).
+
+The latency shown is receive time minus the SEI timestamp, and the SEI
+timestamp is the frame's capture time (the source buffer PTS, see sei.py). It
+therefore spans capture delivery, format conversion, encoding and transport
+combined; transport alone is not measured separately. Across machines it is
+only meaningful if both clocks are synchronized.
 """
 
 from __future__ import annotations
@@ -20,6 +26,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .sei import PACKET_TRAILER_MAGIC, SEI_UUID, TAG_FRAME_ID, TAG_USER_TIMESTAMP
+
+LATENCY_NOTE = (
+    "latency = receive time - SEI capture timestamp (source frame PTS); "
+    "includes capture delivery, conversion, encode and transport, "
+    "not transport alone; cross-machine values need synchronized clocks"
+)
 
 NAL_SLICE = 1
 NAL_IDR = 5
@@ -535,6 +547,7 @@ def parse_tcp_stream(
     nv12_frame_bytes: int | None,
     verbose: bool,
 ) -> int:
+    print("\n========================")
     print(f"Connecting to {host}:{port}...")
     try:
         sock = socket.create_connection((host, port))
@@ -548,6 +561,11 @@ def parse_tcp_stream(
         print(f"Format: {detected}")
     else:
         print("Format: detecting...")
+
+    if sei_detection:
+        print("========================")
+        print(f"\nNote: {LATENCY_NOTE}")
+        print("\n========================")
 
     buffer = bytearray()
     arrivals = ArrivalTracker()
@@ -647,7 +665,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--sei_detection",
         dest="sei_detection",
         action="store_true",
-        help="decode gstreamer-source SEI timestamps (file: embedded time, TCP: latency)",
+        help=(
+            "decode gstreamer-source SEI timestamps (file: embedded capture time; "
+            "TCP: latency from capture to receive, including encode, not transport alone)"
+        ),
     )
     p.add_argument(
         "-v", "--verbose", action="store_true", help="print SEI message details"

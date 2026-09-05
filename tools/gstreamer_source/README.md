@@ -59,8 +59,10 @@ uv run gstreamer-source --no-sei-metadata
 Inspect a stream or file with the parser. It logs every frame (size, NAL
 types, keyframe, live fps) whether or not the stream carries SEI metadata, and
 auto-detects byte-stream vs avc framing. Add `--sei-detection` (or
-`--sei_detection`) to decode the SEI timestamps: embedded time for files,
-end-to-end latency for TCP.
+`--sei_detection`) to decode the SEI timestamps: embedded capture time for
+files, latency for TCP. That latency is receive time minus the frame's capture
+timestamp, so it includes capture delivery, conversion and encoding as well as
+transport; the parser prints a note saying so. Transport alone is not measured.
 
 ```bash
 uv run parse-h264 test.h264
@@ -97,10 +99,18 @@ source ! NV12 caps ! queue(leaky, 1 buffer)
 
 Enabled by default (`--sei-metadata` / `--no-sei-metadata`). Each access unit
 is prefixed with one SEI NAL (`user_data_unregistered`, UUID
-`3fa85f6457174562b3fc2c963f66afa6`) carrying an `LKTS` packet trailer with the
+`3fa85f6457174562b3fc2c963f66afa6`) carrying an `LKTS` packet trailer with a
 wall-clock timestamp in microseconds and a 32-bit frame id. The NAL uses the
 same framing as the stream (start code or 4-byte length), so it works with
 both `byte-stream` and `avc` over TCP and file.
+
+The timestamp is the frame's **capture time**: the buffer PTS set by the
+source (V4L2 buffer timestamp, Argus sensor timestamp, AVFoundation sample
+time, or the scheduled time for `videotestsrc`) converted to wall clock. The
+latency `parse-h264 --sei-detection` reports therefore covers capture-to-
+encoder queuing, encoding, and transport, not just transport. Sensor exposure
+itself is not included unless the driver's timestamp already accounts for it.
+Cross-machine measurements need synchronized clocks.
 
 ## Layout
 

@@ -1,7 +1,13 @@
 """SEI timestamp / frame-id metadata (UUID + LKTS packet trailer) and injection.
 
 The payload format is shared with the LiveKit publisher/viewer tooling and with
-parse_h264_sei.py; keep it byte-for-byte stable.
+the parse-h264 tool; keep it byte-for-byte stable.
+
+The user timestamp carries the frame's *capture* time: the buffer PTS (set by
+the source at capture) converted from the pipeline clock to wall-clock Unix
+microseconds. Latency measured against it therefore includes capture-to-encoder
+queuing and encode time, not just transport. If a buffer has no usable PTS the
+current time is used instead.
 """
 
 from __future__ import annotations
@@ -94,14 +100,49 @@ def create_sei_nalu(
     return bytes(sei_nalu)
 
 
+def capture_time_us(pad: Gst.Pad, buffer: Gst.Buffer) -> int | None:
+    """Wall-clock capture time of `buffer` in microseconds, or None if unknown.
+
+    base_time + running_time(PTS) is the capture instant in the pipeline
+    clock's domain; its age relative to the clock's current time is subtracted
+    from wall-clock now, so the result is independent of which clock the
+    pipeline uses.
+    """
+    pts = buffer.pts
+    if pts == Gst.CLOCK_TIME_NONE:
+        return None
+    # Encoders (GstVideoEncoder) may shift output PTS by a large constant and
+    # compensate in the segment, so go through running time, not raw PTS.
+    segment_event = pad.get_sticky_event(Gst.EventType.SEGMENT, 0)
+    if segment_event is None:
+        return None
+    segment = segment_event.parse_segment()
+    running_time = segment.to_running_time(Gst.Format.TIME, pts)
+    if running_time == Gst.CLOCK_TIME_NONE:
+        return None
+    element = pad.get_parent_element()
+    if element is None:
+        return None
+    clock = element.get_clock()
+    base_time = element.get_base_time()
+    if clock is None or base_time == Gst.CLOCK_TIME_NONE:
+        return None
+    age_ns = clock.get_time() - (base_time + running_time)
+    return (time.time_ns() - age_ns) // 1000
+
+
 class SeiInjector:
-    """Injects an SEI NAL unit in front of every access unit via a pad probe."""
+    """Injects an SEI NAL unit in front of every access unit via a pad probe.
+
+    The SEI timestamp is the frame's capture time (see capture_time_us).
+    """
 
     def __init__(self, stream_format: str = "byte-stream"):
         self.stream_format = stream_format
         self.probe_id: int = 0
         self.frame_count: int = 0
         self.next_frame_id: int = 1
+        self.fallback_count: int = 0
 
     def attach(self, pad: Gst.Pad) -> None:
         self.probe_id = pad.add_probe(Gst.PadProbeType.BUFFER, self.probe_callback)
@@ -116,7 +157,18 @@ class SeiInjector:
         frame_id = self.next_frame_id
         self.next_frame_id = (self.next_frame_id % 0xFFFFFFFF) + 1
 
-        sei_nalu = create_sei_nalu(frame_id=frame_id, stream_format=self.stream_format)
+        timestamp_us = capture_time_us(pad, buffer)
+        if timestamp_us is None:
+            self.fallback_count += 1
+            if self.fallback_count == 1:
+                log.warning(
+                    "buffer has no usable PTS; SEI timestamp falls back to current time"
+                )
+        sei_nalu = create_sei_nalu(
+            timestamp_us=timestamp_us,
+            frame_id=frame_id,
+            stream_format=self.stream_format,
+        )
 
         success, map_info = buffer.map(Gst.MapFlags.READ)
         if not success:
