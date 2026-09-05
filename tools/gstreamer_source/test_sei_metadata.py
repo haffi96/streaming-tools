@@ -1,8 +1,8 @@
 import struct
 import unittest
 
-from gstreamer_source.sei import SEI_UUID, append_packet_trailer, create_sei_nalu
 from gstreamer_source.parse import parse_packet_trailer, parse_user_data
+from gstreamer_source.sei import SEI_UUID, append_packet_trailer, create_sei_nalu
 
 
 class SeiMetadataTests(unittest.TestCase):

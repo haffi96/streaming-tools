@@ -41,6 +41,8 @@ class PipelineConfig:
     encoder: str = "auto"
     bitrate_kbps: int = 2000
     profile: str = "baseline"
+    threads: int = 4  # x264 only
+    sliced_threads: bool = False  # x264 only; True -> multiple slices per frame
     width: int = 1280
     height: int = 720
     fps: int = 30
@@ -171,6 +173,8 @@ def build_pipeline(cfg: PipelineConfig, plat: Platform) -> BuiltPipeline:
             bitrate_kbps=cfg.bitrate_kbps,
             profile=cfg.profile,
             stream_format=cfg.stream_format,
+            threads=cfg.threads,
+            sliced_threads=cfg.sliced_threads,
         )
         if profile_caps:
             chain.caps(profile_caps)
