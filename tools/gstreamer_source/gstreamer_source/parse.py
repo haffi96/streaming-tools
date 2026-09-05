@@ -236,6 +236,9 @@ def split_nalus(
 @dataclass
 class AccessUnit:
     nals: list[bytes] = field(default_factory=list)
+    # Wall-clock time (time.time()) at which the last NAL of this AU was
+    # received; None in file mode.
+    arrival: float | None = None
 
     @property
     def size(self) -> int:
@@ -283,13 +286,14 @@ class AccessUnitAssembler:
         self._current = AccessUnit()
         self._has_vcl = False
 
-    def feed(self, nal: bytes) -> AccessUnit | None:
+    def feed(self, nal: bytes, arrival: float | None = None) -> AccessUnit | None:
         nal_type = nal[0] & 0x1F
         is_vcl = nal_type in VCL_TYPES
         completed: AccessUnit | None = None
         if self._has_vcl and (not is_vcl or _first_mb_in_slice_is_zero(nal)):
             completed = self.flush()
         self._current.nals.append(nal)
+        self._current.arrival = arrival
         if is_vcl:
             self._has_vcl = True
         return completed
@@ -315,6 +319,27 @@ def _iso(ts_us: int) -> str:
         return f"<invalid: {ts_us} us>"
 
 
+class ArrivalTracker:
+    """Maps byte offsets in a receive buffer to the wall-clock arrival time of
+    the chunk they came in with. Needed for Annex B, where a NAL is only known
+    to be complete once the next start code arrives, possibly much later."""
+
+    def __init__(self) -> None:
+        self._chunks: list[tuple[int, float]] = []  # (end offset, arrival)
+
+    def extend(self, length: int, arrival: float) -> None:
+        end = (self._chunks[-1][0] if self._chunks else 0) + length
+        self._chunks.append((end, arrival))
+
+    def consume(self, length: int) -> float | None:
+        """Drop the first `length` bytes; return the arrival time of the last one."""
+        if length <= 0:
+            return None
+        arrival = next((t for end, t in self._chunks if end >= length), None)
+        self._chunks = [(end - length, t) for end, t in self._chunks if end > length]
+        return arrival
+
+
 class FrameReporter:
     """Prints one line per access unit and a summary at the end."""
 
@@ -334,7 +359,10 @@ class FrameReporter:
         self.fps_window: list[float] = []
 
     def frame(self, au: AccessUnit) -> None:
-        now = time.monotonic()
+        # Use the arrival time of the frame's last NAL, not the print time: a
+        # frame is only known to be complete once the next one starts, which
+        # would otherwise add one frame interval to latency and skew fps.
+        now = au.arrival if au.arrival is not None else time.time()
         self.frames += 1
         self.total_bytes += au.size
         if au.is_keyframe:
@@ -356,11 +384,11 @@ class FrameReporter:
                 parts.append(f"fps={fps:4.1f}")
 
         if self.sei_detection:
-            parts.append(self._sei_part(au))
+            parts.append(self._sei_part(au, now))
 
         print("  ".join(parts))
 
-    def _sei_part(self, au: AccessUnit) -> str:
+    def _sei_part(self, au: AccessUnit, now: float) -> str:
         found: SeiTimestamp | None = None
         for payload in au.sei_payloads():
             self.sei_nals += 1
@@ -379,7 +407,7 @@ class FrameReporter:
         self.prev_sei_ts = ts
         frame_id = f"  id={found.frame_id}" if found.frame_id is not None else ""
         if self.live:
-            latency_ms = (time.time() * 1_000_000 - ts) / 1000
+            latency_ms = (now * 1_000_000 - ts) / 1000
             self.latency_sum_ms += latency_ms
             return (
                 f"latency={latency_ms:6.1f}ms  format={found.format}{frame_id}{delta}"
@@ -522,6 +550,7 @@ def parse_tcp_stream(
         print("Format: detecting...")
 
     buffer = bytearray()
+    arrivals = ArrivalTracker()
     reporter: FrameReporter | None = None
     raw: RawReporter | None = None
     assembler = AccessUnitAssembler()
@@ -533,6 +562,7 @@ def parse_tcp_stream(
                 print("\nConnection closed by server")
                 break
             buffer.extend(data)
+            arrivals.extend(len(data), time.time())
 
             if detected is None:
                 if len(buffer) < 8:
@@ -548,10 +578,19 @@ def parse_tcp_stream(
                     reporter = FrameReporter(
                         live=True, sei_detection=sei_detection, verbose=verbose
                     )
+                tracked = len(buffer)
                 for nal in split_nalus(buffer, detected):
-                    au = assembler.feed(nal)
+                    # The splitter has already removed this NAL (and anything
+                    # before it) from the buffer; stamp it with the arrival of
+                    # its last byte.
+                    arrival = arrivals.consume(tracked - len(buffer))
+                    tracked = len(buffer)
+                    au = assembler.feed(nal, arrival)
                     if au:
                         reporter.frame(au)
+                arrivals.consume(
+                    tracked - len(buffer)
+                )  # leading garbage dropped by the splitter
             else:
                 if raw is None:
                     raw = RawReporter(nv12_frame_bytes)
