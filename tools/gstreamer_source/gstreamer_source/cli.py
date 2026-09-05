@@ -210,7 +210,11 @@ def main(argv: list[str] | None = None) -> int:
         format="[%(asctime)s] | %(levelname)-8s | %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
     )
-    Gst.init(None)
+    # Pass a real argv: without the gst-python overrides (e.g. Arch without the
+    # gst-python package) the raw binding rejects None.
+    Gst.init(sys.argv[:1])
+    if not hasattr(Gst, "Fraction"):
+        log.debug("gst-python overrides not installed; running on the raw binding")
     info = platform_info()
     plat = info.platform
     log.info("Platform: %s", info.describe())
