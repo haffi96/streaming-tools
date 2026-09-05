@@ -41,7 +41,7 @@ class PipelineConfig:
     encoder: str = "auto"
     bitrate_kbps: int = 2000
     profile: str = "baseline"
-    threads: int = 4  # x264 only
+    threads: int | None = None  # x264 only; None -> 4 if sliced_threads else 1
     sliced_threads: bool = False  # x264 only; True -> multiple slices per frame
     width: int = 1280
     height: int = 720
@@ -131,6 +131,16 @@ def build_pipeline(cfg: PipelineConfig, plat: Platform) -> BuiltPipeline:
         props: dict[str, object] = dict(cam.properties)
         props["do-timestamp"] = True
         chain.make(cam.element, props)
+        if cam.compressed_only:
+            if any(f in ("MJPG", "JPEG") for f in cam.formats):
+                chain.caps(f"image/jpeg,{geometry}")
+                chain.make("jpegdec")
+            else:
+                raise PipelineError(
+                    f"camera {cam.name} ({cam.path}) only offers compressed formats "
+                    f"{','.join(cam.formats)}; this tool re-encodes raw frames, so pick "
+                    "a node with a raw format (see --list-cameras)"
+                )
         chain.make("videoconvert")
         chain.make("videorate", {"drop-only": True, "skip-to-first": True})
         chain.make("videoscale")

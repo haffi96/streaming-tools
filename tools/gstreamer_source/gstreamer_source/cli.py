@@ -87,9 +87,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
     enc.add_argument(
         "--threads",
         type=int,
-        default=4,
+        default=None,
         metavar="N",
-        help="x264 encoder threads (default 4; 1 avoids frame-threading delay)",
+        help="x264 encoder threads (default: 1, or 4 with --sliced-threads; "
+        "without sliced threads every extra thread adds a frame of delay)",
     )
     enc.add_argument(
         "--sliced-threads",
@@ -272,7 +273,7 @@ def main(argv: list[str] | None = None) -> int:
             cfg.stream_format,
             "on" if built.sei_injector else "off",
             (
-                f", threads={cfg.threads} "
+                f", threads={cfg.threads if cfg.threads is not None else (4 if cfg.sliced_threads else 1)} "
                 + (
                     "sliced (multi-slice frames)"
                     if cfg.sliced_threads

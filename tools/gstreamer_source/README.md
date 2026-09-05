@@ -88,17 +88,27 @@ that is not usable is an error rather than a silent fallback.
 
 ### x264 threading and slices
 
-x264 is tuned `zerolatency` / `ultrafast` with `--threads` (default 4).
-`--sliced-threads` additionally splits every frame into one slice per thread,
-which removes the frame-threading delay (up to `threads - 1` frames) but emits
-several VCL NALs per access unit. Not every consumer copes with that: the
-LiveKit Go SDK reader behind `livekit-cli` paces and packetizes each VCL NAL as
-a complete frame, so multi-slice video plays slowly and partly green. It is off
-by default (one slice per frame, decodes everywhere); turn it on for the
-hybrid-bridge passthrough or any other consumer that assembles access units
-properly. Use `--threads 1` when you want single-slice frames without the
-frame-threading delay and the CPU can keep up (Orin Nano: ~80 fps at 720p,
-~40 fps at 1080p with videotestsrc). Hardware encoders always emit one slice.
+x264 is tuned `zerolatency` / `ultrafast`. `--sliced-threads` splits every
+frame into one slice per thread, which parallelises encoding without adding
+delay but emits several VCL NALs per access unit. Not every consumer copes with
+that: the LiveKit Go SDK reader behind `livekit-cli` paces and packetizes each
+VCL NAL as a complete frame, so multi-slice video plays slowly and partly green.
+It is therefore off by default (one slice per frame, decodes everywhere); turn
+it on for the hybrid-bridge passthrough or any other consumer that assembles
+access units properly.
+
+Without sliced threads x264 frame-threads instead, and every extra thread adds
+a frame of output delay, so `--threads` defaults to 1 in that mode (4 with
+`--sliced-threads`). Measured on an Orin Nano with `videotestsrc`, SEI capture
+timestamps and `parse-h264 --sei-detection` on the same host:
+
+| Mode | 720p30 | 1080p30 | NALs per frame |
+|------|--------|---------|----------------|
+| `--sliced-threads` (threads 4) | ~6 ms | - | 4 slices |
+| default (threads 1) | ~14 ms | ~21 ms | 1 slice |
+| `--no-sliced-threads --threads 4` | ~103 ms | ~106 ms | 1 slice |
+
+Hardware encoders always emit one slice per frame.
 
 Pipeline shape:
 

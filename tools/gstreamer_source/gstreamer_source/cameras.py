@@ -1,14 +1,24 @@
 """Camera discovery and selection.
 
-Uses GstDeviceMonitor everywhere (avfvideosrc on macOS, v4l2src on Linux) and
-maps Jetson CSI sensors to nvarguscamerasrc.
+macOS: GstDeviceMonitor (avfvideosrc).
+Linux / Jetson: every /dev/video* node is queried directly with the V4L2
+QUERYCAP / ENUM_FMT ioctls. GstDeviceMonitor is not used there because on
+Jetson it is PipeWire-backed and hides the CSI sensor node (raw Bayer,
+tegra-video driver) while listing the same UVC camera several times.
+Capture nodes owned by the tegra-video driver are CSI sensors and are mapped
+to nvarguscamerasrc (sensor-id in node order); metadata-only nodes are
+skipped; the remaining nodes become v4l2src cameras annotated with their
+pixel formats.
 """
 
 from __future__ import annotations
 
+import array
+import fcntl
 import glob
 import logging
 import os
+import struct
 import sys
 from dataclasses import dataclass, field
 
@@ -26,6 +36,11 @@ class CameraError(RuntimeError):
     pass
 
 
+COMPRESSED_FORMATS = frozenset(
+    {"MJPG", "JPEG", "H264", "H265", "HEVC", "VP80", "VP90", "AV01"}
+)
+
+
 @dataclass
 class Camera:
     index: int
@@ -33,28 +48,119 @@ class Camera:
     kind: str  # "avf" | "v4l2" | "csi"
     element: str
     properties: dict[str, object] = field(default_factory=dict)
+    formats: tuple[str, ...] = ()  # V4L2 fourccs, empty when unknown
+    path: str | None = None  # /dev/video* node (Linux)
 
     @property
     def location(self) -> str:
         return ", ".join(f"{k}={v}" for k, v in self.properties.items())
 
+    @property
+    def raw_formats(self) -> tuple[str, ...]:
+        return tuple(f for f in self.formats if f not in COMPRESSED_FORMATS)
+
+    @property
+    def compressed_only(self) -> bool:
+        return bool(self.formats) and not self.raw_formats
+
     def describe(self) -> str:
-        return f"{self.name} [{self.kind}] {self.element} {self.location}"
+        fmts = f" formats={','.join(self.formats)}" if self.formats else ""
+        node = f" ({self.path})" if self.path and self.kind == "csi" else ""
+        return f"{self.name} [{self.kind}] {self.element} {self.location}{fmts}{node}"
 
 
-def _monitor_devices() -> list[Gst.Device]:
-    monitor = Gst.DeviceMonitor.new()
-    monitor.add_filter("Video/Source", None)
-    monitor.start()
+# ---- V4L2 ioctl helpers (Linux only) ----
+_VIDIOC_QUERYCAP = 0x80685600  # _IOR('V', 0, struct v4l2_capability) 104 bytes
+_VIDIOC_ENUM_FMT = 0xC0405602  # _IOWR('V', 2, struct v4l2_fmtdesc) 64 bytes
+_V4L2_CAP_VIDEO_CAPTURE = 0x00000001
+_V4L2_CAP_VIDEO_CAPTURE_MPLANE = 0x00001000
+_V4L2_CAP_DEVICE_CAPS = 0x80000000
+_V4L2_BUF_TYPE_VIDEO_CAPTURE = 1
+_V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE = 9
+
+
+@dataclass
+class V4l2Node:
+    path: str
+    driver: str
+    card: str
+    bus_info: str
+    device_caps: int
+    formats: tuple[str, ...]
+
+    @property
+    def is_capture(self) -> bool:
+        return bool(
+            self.device_caps
+            & (_V4L2_CAP_VIDEO_CAPTURE | _V4L2_CAP_VIDEO_CAPTURE_MPLANE)
+        )
+
+    @property
+    def is_tegra_csi(self) -> bool:
+        return self.driver.startswith("tegra") or "vi-output" in self.card.lower()
+
+
+def _cstr(raw: bytes) -> str:
+    return raw.split(b"\0", 1)[0].decode(errors="replace").strip()
+
+
+def _enum_formats(fd: int, buf_type: int) -> tuple[str, ...]:
+    formats: list[str] = []
+    for index in range(64):
+        req = array.array(
+            "B", struct.pack("<III32sIII3I", index, buf_type, 0, b"", 0, 0, 0, 0, 0, 0)
+        )
+        try:
+            fcntl.ioctl(fd, _VIDIOC_ENUM_FMT, req, True)
+        except OSError:
+            break
+        pixelformat = struct.unpack_from("<I", req, 44)[0]
+        formats.append(_cstr(pixelformat.to_bytes(4, "little")) or f"{pixelformat:#x}")
+    return tuple(formats)
+
+
+def query_v4l2_node(path: str) -> V4l2Node | None:
+    """QUERYCAP + ENUM_FMT on a /dev/video* node; None if it cannot be opened."""
     try:
-        return list(monitor.get_devices() or [])
+        fd = os.open(path, os.O_RDWR | os.O_NONBLOCK)
+    except OSError as exc:
+        log.debug("cannot open %s: %s", path, exc)
+        return None
+    try:
+        cap = array.array("B", bytes(104))
+        try:
+            fcntl.ioctl(fd, _VIDIOC_QUERYCAP, cap, True)
+        except OSError as exc:
+            log.debug("QUERYCAP failed on %s: %s", path, exc)
+            return None
+        driver, card, bus_info, _version, capabilities, device_caps = (
+            struct.unpack_from("<16s32s32sIII", cap, 0)
+        )
+        if not capabilities & _V4L2_CAP_DEVICE_CAPS:
+            device_caps = capabilities
+        formats: tuple[str, ...] = ()
+        if device_caps & _V4L2_CAP_VIDEO_CAPTURE:
+            formats = _enum_formats(fd, _V4L2_BUF_TYPE_VIDEO_CAPTURE)
+        elif device_caps & _V4L2_CAP_VIDEO_CAPTURE_MPLANE:
+            formats = _enum_formats(fd, _V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE)
+        return V4l2Node(
+            path=path,
+            driver=_cstr(driver),
+            card=_cstr(card),
+            bus_info=_cstr(bus_info),
+            device_caps=device_caps,
+            formats=formats,
+        )
     finally:
-        monitor.stop()
+        os.close(fd)
 
 
-def _is_csi_device_name(name: str) -> bool:
-    lowered = name.lower()
-    return "vi-output" in lowered or "tegra" in lowered
+def _video_nodes() -> list[str]:
+    def key(path: str) -> int:
+        digits = "".join(ch for ch in os.path.basename(path) if ch.isdigit())
+        return int(digits) if digits else 0
+
+    return sorted(glob.glob("/dev/video[0-9]*"), key=key)
 
 
 def _avf_device_index(device: Gst.Device, fallback: int) -> int:
@@ -62,17 +168,6 @@ def _avf_device_index(device: Gst.Device, fallback: int) -> int:
     if element is not None and element.find_property("device-index") is not None:
         return int(element.get_property("device-index"))
     return fallback
-
-
-def _v4l2_path(device: Gst.Device) -> str | None:
-    props = device.get_properties()
-    if props is None:
-        return None
-    for key in ("device.path", "api.v4l2.path", "object.path"):
-        path = props.get_string(key)
-        if path and path.startswith("/dev/"):
-            return path
-    return None
 
 
 def _sysfs_v4l2_name(path: str) -> str:
@@ -86,9 +181,15 @@ def _sysfs_v4l2_name(path: str) -> str:
 
 def enumerate_cameras(plat: Platform) -> list[Camera]:
     cameras: list[Camera] = []
-    devices = _monitor_devices()
 
     if plat == Platform.MACOS:
+        monitor = Gst.DeviceMonitor.new()
+        monitor.add_filter("Video/Source", None)
+        monitor.start()
+        try:
+            devices = list(monitor.get_devices() or [])
+        finally:
+            monitor.stop()
         for i, device in enumerate(devices):
             cameras.append(
                 Camera(
@@ -105,53 +206,74 @@ def enumerate_cameras(plat: Platform) -> list[Camera]:
         log.warning("Camera enumeration not supported on %s", plat.value)
         return cameras
 
-    have_argus = plat == Platform.JETSON and Gst.ElementFactory.find("nvarguscamerasrc")
+    have_argus = plat == Platform.JETSON and bool(
+        Gst.ElementFactory.find("nvarguscamerasrc")
+    )
     csi_sensor = 0
-    seen_paths: set[str] = set()
+    unreadable: list[str] = []
 
-    for device in sorted(devices, key=lambda d: _v4l2_path(d) or ""):
-        name = device.get_display_name()
-        path = _v4l2_path(device)
-        if plat == Platform.JETSON and _is_csi_device_name(name):
+    for path in _video_nodes():
+        node = query_v4l2_node(path)
+        if node is None:
+            unreadable.append(path)
+            continue
+        if not node.is_capture:
+            log.debug("skip %s (%s): not a video capture node", path, node.card)
+            continue
+        if plat == Platform.JETSON and node.is_tegra_csi:
+            sensor = node.card.split(",", 1)[-1].strip() or node.card
             if have_argus:
                 cameras.append(
                     Camera(
                         index=len(cameras),
-                        name=f"{name} (CSI)",
+                        name=f"{sensor} (CSI)",
                         kind="csi",
                         element="nvarguscamerasrc",
                         properties={"sensor-id": csi_sensor},
+                        formats=node.formats,
+                        path=path,
                     )
+                )
+            else:
+                log.warning(
+                    "%s is a CSI sensor (%s) but nvarguscamerasrc is not available",
+                    path,
+                    sensor,
                 )
             csi_sensor += 1
             continue
-        if not path:
-            continue
-        seen_paths.add(path)
         cameras.append(
             Camera(
                 index=len(cameras),
-                name=name,
+                name=node.card,
                 kind="v4l2",
                 element="v4l2src",
                 properties={"device": path},
+                formats=node.formats,
+                path=path,
             )
         )
 
-    if not devices:
-        # No v4l2 device provider (plugin missing): fall back to /dev/video*.
-        for path in sorted(glob.glob("/dev/video*")):
-            if path in seen_paths:
-                continue
-            cameras.append(
-                Camera(
-                    index=len(cameras),
-                    name=_sysfs_v4l2_name(path),
-                    kind="v4l2",
-                    element="v4l2src",
-                    properties={"device": path},
+    if unreadable:
+        if not cameras:
+            # Fall back to names from sysfs / the device monitor.
+            for path in unreadable:
+                cameras.append(
+                    Camera(
+                        index=len(cameras),
+                        name=_sysfs_v4l2_name(path),
+                        kind="v4l2",
+                        element="v4l2src",
+                        properties={"device": path},
+                        path=path,
+                    )
                 )
+            log.warning(
+                "could not query %s (permissions? add the user to the 'video' group)",
+                ", ".join(unreadable),
             )
+        else:
+            log.debug("unreadable video nodes: %s", ", ".join(unreadable))
     return cameras
 
 
