@@ -174,7 +174,7 @@ def configure_encoder(
     bitrate_kbps: int,
     profile: str,
     stream_format: str,
-    threads: int = 4,
+    threads: int | None = None,
     sliced_threads: bool = False,
 ) -> str | None:
     """Apply low-latency settings; return a caps string to pin after the encoder
@@ -184,9 +184,10 @@ def configure_encoder(
     frame into one slice per thread (several VCL NALs per access unit), which
     cuts encode latency but breaks consumers that assume one VCL NAL per frame
     (the LiveKit Go SDK reader used by livekit-cli paces and packetizes each
-    VCL NAL as a whole frame -> slow, partially green video). Off by default;
-    frame threading is used instead, which adds up to ``threads - 1`` frames of
-    encoder delay."""
+    VCL NAL as a whole frame -> slow, partially green video). Off by default.
+    Without sliced threads x264 frame-threads instead, which delays output by
+    ``threads - 1`` frames (~100 ms at 30 fps with 4 threads), so ``threads``
+    defaults to 1 in that mode and to 4 with sliced threads."""
     if profile not in PROFILES:
         raise EncoderError(f"unknown profile '{profile}' (use {', '.join(PROFILES)})")
 
@@ -199,6 +200,8 @@ def configure_encoder(
         _set(element, "bitrate", bitrate_kbps)
         _set(element, "key-int-max", fps)
         _set(element, "bframes", 0)
+        if threads is None:
+            threads = 4 if sliced_threads else 1
         _set(element, "threads", threads)
         _set(element, "sliced-threads", sliced_threads)
         _set(element, "byte-stream", stream_format == "byte-stream")
