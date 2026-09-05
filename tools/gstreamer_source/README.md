@@ -22,8 +22,9 @@ uv sync
 
 Pre-requisites: GStreamer 1.20+ with the base/good/bad/ugly plugin sets,
 Python 3.10+, and the platform's hardware encoder plugin (VideoToolbox is part
-of the macOS GStreamer build, `nvv4l2h264enc` ships with JetPack, `va`/`v4l2`
-plugins on Ubuntu).
+of the macOS GStreamer build, `nvv4l2h264enc` ships with JetPack, `nvh264enc`
+comes from the `nvcodec` plugin in gst-plugins-bad on machines with a discrete
+NVIDIA GPU, `va`/`v4l2` plugins on Ubuntu).
 
 The gst-python overrides are optional: the tool runs on the raw PyGObject
 binding too (Arch/Omarchy without the `gst-python` package). On Arch install
@@ -83,7 +84,7 @@ ffplay -i test.h264
 | --- | --- | --- | --- |
 | macOS | `platform.system()` | `avfvideosrc` (GstDeviceMonitor) | `vtenc` > `x264` |
 | Jetson (Orin Nano, Thor, ...) | `/etc/nv_tegra_release`, tegra kernel, device-tree model | CSI: `nvarguscamerasrc`, USB: `v4l2src` | `nvv4l2` > `x264` |
-| Ubuntu / other Linux | fallback | `v4l2src` | `v4l2` > `va` > `vaapi` > `x264` |
+| Ubuntu / other Linux | fallback | `v4l2src` | `nvenc` > `v4l2` > `va` > `vaapi` > `x264` |
 
 ### Cameras
 
@@ -113,6 +114,13 @@ On Jetson the `nvv4l2h264enc` plugin is always installed, so the tool also
 checks for an NVENC device node; on an Orin Nano (no H.264 hardware encoder)
 `auto` therefore falls through to `x264`. Requesting an encoder explicitly
 that is not usable is an error rather than a silent fallback.
+
+On a desktop Linux box with an NVIDIA GPU the `nvcodec` plugin registers
+`nvh264enc` only if it can create a CUDA context and load `libnvidia-encode`
+when the plugin registry is scanned. If `--list-encoders` reports `nvenc` as
+not installed while `nvidia-smi` works, the cached registry was probably built
+while the driver was unavailable; `rm ~/.cache/gstreamer-1.0/registry.*.bin`
+forces a rescan.
 
 ### x264 threading and slices
 

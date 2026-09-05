@@ -39,6 +39,7 @@ ENCODERS: tuple[EncoderSpec, ...] = (
     EncoderSpec("x264", ("x264enc",), "software (libx264)"),
     EncoderSpec("vtenc", ("vtenc_h264_hw", "vtenc_h264"), "Apple VideoToolbox"),
     EncoderSpec("nvv4l2", ("nvv4l2h264enc",), "NVIDIA Jetson NVENC", needs_nvmm=True),
+    EncoderSpec("nvenc", ("nvh264enc", "nvautogpuh264enc"), "NVIDIA NVENC (nvcodec plugin)"),
     EncoderSpec("v4l2", ("v4l2h264enc",), "V4L2 stateful hardware encoder"),
     EncoderSpec("va", ("vah264enc",), "VA-API (va plugin)"),
     EncoderSpec("vaapi", ("vaapih264enc",), "VA-API (legacy gstreamer-vaapi)"),
@@ -81,7 +82,7 @@ def encoder_preference(plat: Platform) -> list[str]:
     if plat == Platform.JETSON:
         return ["nvv4l2", "x264"]
     if plat == Platform.LINUX:
-        return ["v4l2", "va", "vaapi", "x264"]
+        return ["nvenc", "v4l2", "va", "vaapi", "x264"]
     return ["x264"]
 
 
@@ -226,6 +227,19 @@ def configure_encoder(
         _set(element, "insert-sps-pps", True)
         _set(element, "maxperf-enable", True)
         return None
+
+    if key == "nvenc":
+        # Desktop/datacenter NVENC via the nvcodec plugin (gst-plugins-bad).
+        # Takes system-memory NV12 directly and picks the profile from caps.
+        _set(element, "preset", "p1")
+        _set(element, "tune", "ultra-low-latency")
+        _set(element, "rc-mode", "cbr")
+        _set(element, "bitrate", bitrate_kbps)
+        _set(element, "gop-size", fps)
+        _set(element, "bframes", 0)
+        _set(element, "zerolatency", True)
+        _set(element, "repeat-sequence-header", True)
+        return f"video/x-h264,profile={caps_profile}"
 
     if key == "v4l2":
         v4l2_profile = {"baseline": 0, "main": 2, "high": 4}[profile]
