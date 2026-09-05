@@ -55,6 +55,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
     src.add_argument(
         "--pattern", default="ball", help="videotestsrc pattern for the test source"
     )
+    src.add_argument(
+        "--camera-format",
+        choices=["auto", "raw", "mjpeg"],
+        default="auto",
+        help="v4l2 cameras: capture MJPEG (decoded with jpegdec) or a raw format; "
+        "auto prefers MJPEG when the camera offers it, since UVC cameras usually "
+        "reach 720p/1080p at 30 fps only that way",
+    )
     src.add_argument("--width", type=int, default=1280)
     src.add_argument("--height", type=int, default=720)
     src.add_argument("--fps", type=int, default=30)
@@ -254,6 +262,7 @@ def main(argv: list[str] | None = None) -> int:
         pattern=args.pattern,
         sei_metadata=args.sei_metadata,
         camera=camera,
+        camera_format=args.camera_format,
     )
 
     try:
