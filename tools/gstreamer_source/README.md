@@ -25,6 +25,11 @@ Python 3.10+, and the platform's hardware encoder plugin (VideoToolbox is part
 of the macOS GStreamer build, `nvv4l2h264enc` ships with JetPack, `va`/`v4l2`
 plugins on Ubuntu).
 
+The gst-python overrides are optional: the tool runs on the raw PyGObject
+binding too (Arch/Omarchy without the `gst-python` package). On Arch install
+`gstreamer gst-plugins-base gst-plugins-good gst-plugins-bad gst-plugins-ugly
+gst-plugin-va gst-python` for the full feature set.
+
 ## Usage
 
 ```bash
