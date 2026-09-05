@@ -1,0 +1,17 @@
+[project]
+name = "network-probe"
+version = "0.1.0"
+description = "Authenticated TCP and UDP reachability diagnostics for VPN peers"
+readme = "README.md"
+authors = [
+    { name = "Haffi Mazhar", email = "haffimazhar96@gmail.com" }
+]
+requires-python = ">=3.10"
+dependencies = []
+
+[project.scripts]
+network-probe = "network_probe.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
