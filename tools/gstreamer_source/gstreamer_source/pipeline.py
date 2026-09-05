@@ -49,6 +49,7 @@ class PipelineConfig:
     pattern: str = "ball"
     sei_metadata: bool = True
     camera: Camera | None = None
+    camera_format: str = "auto"  # auto | raw | mjpeg (v4l2 cameras only)
 
 
 @dataclass
@@ -131,16 +132,31 @@ def build_pipeline(cfg: PipelineConfig, plat: Platform) -> BuiltPipeline:
         props: dict[str, object] = dict(cam.properties)
         props["do-timestamp"] = True
         chain.make(cam.element, props)
-        if cam.compressed_only:
-            if any(f in ("MJPG", "JPEG") for f in cam.formats):
-                chain.caps(f"image/jpeg,{geometry}")
-                chain.make("jpegdec")
-            else:
-                raise PipelineError(
-                    f"camera {cam.name} ({cam.path}) only offers compressed formats "
-                    f"{','.join(cam.formats)}; this tool re-encodes raw frames, so pick "
-                    "a node with a raw format (see --list-cameras)"
-                )
+        has_mjpeg = any(f in ("MJPG", "JPEG") for f in cam.formats)
+        if cfg.camera_format == "mjpeg" and not has_mjpeg and cam.formats:
+            raise PipelineError(
+                f"camera {cam.name} ({cam.path}) has no MJPEG format "
+                f"(offers {','.join(cam.formats)})"
+            )
+        if cfg.camera_format == "raw" and cam.compressed_only:
+            raise PipelineError(
+                f"camera {cam.name} ({cam.path}) only offers compressed formats "
+                f"{','.join(cam.formats)}"
+            )
+        if cam.compressed_only and not has_mjpeg:
+            raise PipelineError(
+                f"camera {cam.name} ({cam.path}) only offers compressed formats "
+                f"{','.join(cam.formats)}; this tool re-encodes raw frames, so pick "
+                "a node with a raw or MJPEG format (see --list-cameras)"
+            )
+        # UVC cameras usually reach 720p/1080p at 30 fps only via MJPEG; their
+        # raw modes are small or slow. Prefer MJPEG unless told otherwise.
+        use_mjpeg = cfg.camera_format == "mjpeg" or (
+            cfg.camera_format == "auto" and has_mjpeg
+        )
+        if use_mjpeg:
+            chain.caps(f"image/jpeg,{geometry}")
+            chain.make("jpegdec")
         chain.make("videoconvert")
         chain.make("videorate", {"drop-only": True, "skip-to-first": True})
         chain.make("videoscale")

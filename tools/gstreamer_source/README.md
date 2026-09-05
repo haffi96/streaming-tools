@@ -80,6 +80,29 @@ ffplay -i test.h264
 | Jetson (Orin Nano, Thor, ...) | `/etc/nv_tegra_release`, tegra kernel, device-tree model | CSI: `nvarguscamerasrc`, USB: `v4l2src` | `nvv4l2` > `x264` |
 | Ubuntu / other Linux | fallback | `v4l2src` | `v4l2` > `va` > `vaapi` > `x264` |
 
+### Cameras
+
+On Linux and Jetson every `/dev/video*` node is queried directly with the V4L2
+`QUERYCAP` / `ENUM_FMT` ioctls rather than through GstDeviceMonitor: on Jetson
+the monitor is PipeWire-backed and hides the CSI sensor node while listing UVC
+metadata nodes. Capture nodes owned by the `tegra-video` driver are CSI sensors
+and become `nvarguscamerasrc sensor-id=N` (N in node order); metadata-only
+nodes are skipped; everything else is a `v4l2src` camera listed with its pixel
+formats, e.g.
+
+```
+Detected cameras (3):
+  [0] imx219 9-0010 (CSI) [csi] nvarguscamerasrc sensor-id=0 formats=RG10 (/dev/video0)
+  [1] H264 USB Camera: USB Camera [v4l2] v4l2src device=/dev/video1 formats=MJPG,YUYV
+  [2] H264 USB Camera: USB Camera [v4l2] v4l2src device=/dev/video3 formats=H264
+```
+
+UVC cameras usually reach 720p/1080p at 30 fps only via MJPEG, so v4l2 cameras
+are captured as `image/jpeg ! jpegdec` whenever MJPG is offered
+(`--camera-format raw` forces a raw format, `mjpeg` requires MJPEG). Nodes that
+only offer H.264 (like `/dev/video3` above) cannot be used by this tool, which
+re-encodes raw frames; selecting one is an error.
+
 `--list-encoders` shows every known encoder with the reason it is unusable.
 On Jetson the `nvv4l2h264enc` plugin is always installed, so the tool also
 checks for an NVENC device node; on an Orin Nano (no H.264 hardware encoder)
