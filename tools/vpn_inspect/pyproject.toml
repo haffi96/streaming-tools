@@ -1,0 +1,19 @@
+[project]
+name = "vpn-inspect"
+version = "0.1.0"
+description = "Inspect VPN routes, interfaces, MTU, and peer reachability"
+readme = "README.md"
+authors = [
+    { name = "Haffi Mazhar", email = "haffimazhar96@gmail.com" }
+]
+requires-python = ">=3.10"
+dependencies = [
+    "psutil>=5.9",
+]
+
+[project.scripts]
+vpn-inspect = "vpn_inspect.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"

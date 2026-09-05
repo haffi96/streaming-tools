@@ -3,6 +3,9 @@ name = "streaming-tools"
 version = "0.1.0"
 description = "Network video/data streaming tools"
 requires-python = ">=3.10"
+dependencies = [
+    "pygobject>=3.48.2",
+]
 
 [tool.uv.workspace]
 members = ["tools/*", "apps/livekit_tester/"]
