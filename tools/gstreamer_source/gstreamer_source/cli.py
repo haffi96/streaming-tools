@@ -85,6 +85,24 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--profile", choices=list(PROFILES), default="baseline", help="H.264 profile"
     )
     enc.add_argument(
+        "--threads",
+        type=int,
+        default=4,
+        metavar="N",
+        help="x264 encoder threads (default 4; 1 avoids frame-threading delay)",
+    )
+    enc.add_argument(
+        "--sliced-threads",
+        "--sliced_threads",
+        dest="sliced_threads",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="x264: encode each frame as one slice per thread (lowest encode "
+        "latency, several VCL NALs per frame). Fine for the hybrid-bridge "
+        "passthrough; breaks livekit-cli, which treats every VCL NAL as a "
+        "frame. Default off: one slice per frame",
+    )
+    enc.add_argument(
         "--sei-metadata",
         "--sei_metadata",
         dest="sei_metadata",
@@ -227,6 +245,8 @@ def main(argv: list[str] | None = None) -> int:
         encoder=args.encoder,
         bitrate_kbps=args.bitrate,
         profile=args.profile,
+        threads=args.threads,
+        sliced_threads=args.sliced_threads,
         width=args.width,
         height=args.height,
         fps=args.fps,
@@ -244,13 +264,23 @@ def main(argv: list[str] | None = None) -> int:
     log.info("Video: %dx%d@%d", cfg.width, cfg.height, cfg.fps)
     if built.encoder:
         log.info(
-            "Encoder: %s (%s) %s profile, %d kbps, %s, SEI %s",
+            "Encoder: %s (%s) %s profile, %d kbps, %s, SEI %s%s",
             built.encoder.key,
             built.encoder.element,
             cfg.profile,
             cfg.bitrate_kbps,
             cfg.stream_format,
             "on" if built.sei_injector else "off",
+            (
+                f", threads={cfg.threads} "
+                + (
+                    "sliced (multi-slice frames)"
+                    if cfg.sliced_threads
+                    else "single-slice frames"
+                )
+                if built.encoder.key == "x264"
+                else ""
+            ),
         )
     else:
         log.info("Codec: raw NV12")

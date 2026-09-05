@@ -86,6 +86,20 @@ checks for an NVENC device node; on an Orin Nano (no H.264 hardware encoder)
 `auto` therefore falls through to `x264`. Requesting an encoder explicitly
 that is not usable is an error rather than a silent fallback.
 
+### x264 threading and slices
+
+x264 is tuned `zerolatency` / `ultrafast` with `--threads` (default 4).
+`--sliced-threads` additionally splits every frame into one slice per thread,
+which removes the frame-threading delay (up to `threads - 1` frames) but emits
+several VCL NALs per access unit. Not every consumer copes with that: the
+LiveKit Go SDK reader behind `livekit-cli` paces and packetizes each VCL NAL as
+a complete frame, so multi-slice video plays slowly and partly green. It is off
+by default (one slice per frame, decodes everywhere); turn it on for the
+hybrid-bridge passthrough or any other consumer that assembles access units
+properly. Use `--threads 1` when you want single-slice frames without the
+frame-threading delay and the CPU can keep up (Orin Nano: ~80 fps at 720p,
+~40 fps at 1080p with videotestsrc). Hardware encoders always emit one slice.
+
 Pipeline shape:
 
 ```
