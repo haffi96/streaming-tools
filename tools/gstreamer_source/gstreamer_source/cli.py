@@ -119,6 +119,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default=True,
         help="inject SEI timestamp/frame-id NAL before every access unit (h264 only)",
     )
+    enc.add_argument(
+        "--timestamps",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="burn a running millisecond clock (h:mm:ss.mmm since start, taken "
+        "from each frame's capture time) into the top-left of every frame",
+    )
 
     out = p.add_argument_group("output")
     out.add_argument("--output", choices=["tcp", "file"], default="tcp")
@@ -265,6 +272,7 @@ def main(argv: list[str] | None = None) -> int:
         fps=args.fps,
         pattern=args.pattern,
         sei_metadata=args.sei_metadata,
+        timestamps=args.timestamps,
         camera=camera,
         camera_format=args.camera_format,
     )
@@ -276,6 +284,8 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     log.info("Video: %dx%d@%d", cfg.width, cfg.height, cfg.fps)
+    if cfg.timestamps:
+        log.info("Overlay: running millisecond clock (textoverlay)")
     if built.encoder:
         log.info(
             "Encoder: %s (%s) %s profile, %d kbps, %s, SEI %s%s",

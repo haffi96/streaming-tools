@@ -1,7 +1,7 @@
 """Pipeline construction.
 
 Shape:
-  source -> NV12 caps -> leaky 1-buffer queue
+  source -> NV12 caps -> leaky 1-buffer queue -> [textoverlay (--timestamps)]
          -> [nvvidconv] -> encoder -> [profile caps] -> h264parse
          -> stream-format caps (SEI probe) -> tcpserversink | filesink
 
@@ -20,6 +20,7 @@ from gi.repository import Gst
 
 from .cameras import Camera
 from .encoders import EncoderStatus, configure_encoder, resolve_encoder
+from .overlay import TimestampOverlay
 from .platform import Platform
 from .sei import SeiInjector
 
@@ -48,6 +49,7 @@ class PipelineConfig:
     fps: int = 30
     pattern: str = "ball"
     sei_metadata: bool = True
+    timestamps: bool = False  # burn a running millisecond clock into the frames
     camera: Camera | None = None
     camera_format: str = "auto"  # auto | raw | mjpeg (v4l2 cameras only)
 
@@ -58,6 +60,7 @@ class BuiltPipeline:
     sei_injector: SeiInjector | None
     encoder: EncoderStatus | None
     chain: list[str]
+    timestamp_overlay: TimestampOverlay | None = None
 
     def describe(self) -> str:
         return " ! ".join(self.chain)
@@ -173,6 +176,30 @@ def build_pipeline(cfg: PipelineConfig, plat: Platform) -> BuiltPipeline:
         },
     )
 
+    # ---- timestamp overlay ----
+    timestamp_overlay: TimestampOverlay | None = None
+    if cfg.timestamps:
+        if nvmm:
+            # textoverlay blends into system memory; the encoder stage below
+            # converts back to NVMM if it needs it.
+            chain.make("nvvidconv")
+            chain.caps(raw_caps)
+            nvmm = False
+        overlay = chain.make(
+            "textoverlay",
+            {
+                "text": "0:00:00.000",
+                "font-desc": f"Monospace Bold {max(12, cfg.height // 20)}",
+                "valignment": "top",
+                "halignment": "left",
+                "xpad": 16,
+                "ypad": 16,
+                "shaded-background": True,
+            },
+            label="textoverlay",
+        )
+        timestamp_overlay = TimestampOverlay(overlay)
+
     # ---- codec ----
     sei_pad_owner: Gst.Element | None = None
     encoder_status: EncoderStatus | None = None
@@ -224,6 +251,9 @@ def build_pipeline(cfg: PipelineConfig, plat: Platform) -> BuiltPipeline:
 
     chain.link()
 
+    if timestamp_overlay is not None:
+        timestamp_overlay.attach()
+
     sei_injector: SeiInjector | None = None
     if cfg.codec == "h264" and cfg.sei_metadata and sei_pad_owner is not None:
         src_pad = sei_pad_owner.get_static_pad("src")
@@ -232,4 +262,6 @@ def build_pipeline(cfg: PipelineConfig, plat: Platform) -> BuiltPipeline:
         sei_injector = SeiInjector(cfg.stream_format)
         sei_injector.attach(src_pad)
 
-    return BuiltPipeline(pipeline, sei_injector, encoder_status, chain.chain)
+    return BuiltPipeline(
+        pipeline, sei_injector, encoder_status, chain.chain, timestamp_overlay
+    )

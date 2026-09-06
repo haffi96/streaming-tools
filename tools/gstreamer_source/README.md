@@ -60,6 +60,9 @@ uv run gstreamer-source --output file --path test.h264 --duration 5
 
 # Disable SEI injection
 uv run gstreamer-source --no-sei-metadata
+
+# Burn a running millisecond clock (h:mm:ss.mmm since start) into the frames
+uv run gstreamer-source --timestamps
 ```
 
 Inspect a stream or file with the parser. It logs every frame (size, NAL
@@ -149,7 +152,7 @@ Hardware encoders always emit one slice per frame.
 Pipeline shape:
 
 ```
-source ! NV12 caps ! queue(leaky, 1 buffer)
+source ! NV12 caps ! queue(leaky, 1 buffer) ! [textoverlay]   <- --timestamps
        ! [nvvidconv] ! <encoder> ! [profile caps] ! h264parse config-interval=-1
        ! video/x-h264,stream-format=<byte-stream|avc>,alignment=au   <- SEI probe
        ! tcpserversink | filesink
@@ -172,6 +175,18 @@ encoder queuing, encoding, and transport, not just transport. Sensor exposure
 itself is not included unless the driver's timestamp already accounts for it.
 Cross-machine measurements need synchronized clocks.
 
+## Timestamp overlay
+
+`--timestamps` burns a running clock (`h:mm:ss.mmm`) into the top-left corner
+of every frame so a receiver's display can be compared against the source by
+eye or from a screen recording. The text is rendered by `textoverlay`; a pad
+probe rewrites it per frame from the buffer's running time, i.e. the frame's
+capture time relative to pipeline start, the same instant the SEI timestamp
+encodes. No wall-clock or monotonic clock is read on the streaming thread, so
+the only cost is the pango render of the changed text. On Jetson CSI sources
+the overlay forces a round trip through system memory (`nvvidconv` before and
+after). Works with `--codec nv12` too, since it sits before the encoder.
+
 ## Layout
 
 ```
@@ -182,6 +197,7 @@ gstreamer_source/
   cameras.py    camera enumeration and --camera selection
   pipeline.py   pipeline construction
   sei.py        SEI NAL construction and pad-probe injector
+  overlay.py    --timestamps running-clock textoverlay driver
   parse.py      parser / verifier (`parse-h264`, file or TCP)
 test_sei_metadata.py
 ```

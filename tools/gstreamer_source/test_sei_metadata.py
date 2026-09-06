@@ -48,3 +48,13 @@ class SeiMetadataTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TimestampOverlayTests(unittest.TestCase):
+    def test_format_clock_ms(self):
+        from gstreamer_source.overlay import format_clock_ms
+
+        self.assertEqual(format_clock_ms(0), "0:00:00.000")
+        self.assertEqual(format_clock_ms(1_522), "0:00:01.522")
+        self.assertEqual(format_clock_ms(61_005), "0:01:01.005")
+        self.assertEqual(format_clock_ms(3_661_999), "1:01:01.999")
