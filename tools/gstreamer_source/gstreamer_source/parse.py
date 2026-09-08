@@ -36,6 +36,7 @@ LATENCY_NOTE = (
 NAL_SLICE = 1
 NAL_IDR = 5
 NAL_SEI = 6
+NAL_AUD = 9
 NAL_NAMES = {
     1: "slice",
     2: "slice-A",
@@ -207,6 +208,20 @@ def split_annexb(buffer: bytearray, final: bool) -> Iterator[bytes]:
                 del buffer[:-3]
             return
         nal_start = start_idx + code_len
+        # An access unit delimiter is exactly two bytes (header, then
+        # primary_pic_type and the stop bit), so it is complete without the
+        # next start code. Streams that terminate every AU with an AUD
+        # (gstreamer-source --au-terminator) are then reported frame by frame
+        # as each one arrives rather than when the next frame starts.
+        if (
+            len(buffer) >= nal_start + 2
+            and buffer[nal_start] & 0x80 == 0
+            and buffer[nal_start] & 0x1F == NAL_AUD
+        ):
+            nal = bytes(buffer[nal_start : nal_start + 2])
+            del buffer[: nal_start + 2]
+            yield nal
+            continue
         next_idx, _ = find_start_code(buffer, nal_start)
         if next_idx == -1:
             if not final:

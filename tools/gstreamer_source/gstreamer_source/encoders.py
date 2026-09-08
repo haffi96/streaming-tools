@@ -177,6 +177,7 @@ def configure_encoder(
     stream_format: str,
     threads: int | None = None,
     sliced_threads: bool = False,
+    aud: bool = True,
 ) -> str | None:
     """Apply low-latency settings; return a caps string to pin after the encoder
     (used by encoders that take the profile from caps), or None.
@@ -188,7 +189,11 @@ def configure_encoder(
     VCL NAL as a whole frame -> slow, partially green video). Off by default.
     Without sliced threads x264 frame-threads instead, which delays output by
     ``threads - 1`` frames (~100 ms at 30 fps with 4 threads), so ``threads``
-    defaults to 1 in that mode and to 4 with sliced threads."""
+    defaults to 1 in that mode and to 4 with sliced threads.
+
+    ``aud`` controls x264's own access unit delimiter at the front of every AU
+    (its default); the pipeline turns it off when it terminates AUs itself.
+    Hardware encoders do not emit AUDs."""
     if profile not in PROFILES:
         raise EncoderError(f"unknown profile '{profile}' (use {', '.join(PROFILES)})")
 
@@ -205,6 +210,7 @@ def configure_encoder(
             threads = 4 if sliced_threads else 1
         _set(element, "threads", threads)
         _set(element, "sliced-threads", sliced_threads)
+        _set(element, "aud", aud)
         _set(element, "byte-stream", stream_format == "byte-stream")
         return f"video/x-h264,profile={caps_profile}"
 

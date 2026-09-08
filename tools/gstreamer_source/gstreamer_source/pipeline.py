@@ -3,7 +3,7 @@
 Shape:
   source -> NV12 caps -> leaky 1-buffer queue -> [textoverlay (--timestamps)]
          -> [nvvidconv] -> encoder -> [profile caps] -> h264parse
-         -> stream-format caps (SEI probe) -> tcpserversink | filesink
+         -> stream-format caps (SEI / AU-terminator probe) -> tcpserversink | filesink
 
 With --codec nv12 the encoder stage is skipped and raw NV12 frames go to the sink.
 """
@@ -49,6 +49,9 @@ class PipelineConfig:
     fps: int = 30
     pattern: str = "ball"
     sei_metadata: bool = True
+    # Append an AUD NAL to every access unit so a byte-stream receiver can
+    # complete the frame without waiting for the next one (see sei.py).
+    au_terminator: bool = True
     timestamps: bool = False  # burn a running millisecond clock into the frames
     camera: Camera | None = None
     camera_format: str = "auto"  # auto | raw | mjpeg (v4l2 cameras only)
@@ -228,6 +231,9 @@ def build_pipeline(cfg: PipelineConfig, plat: Platform) -> BuiltPipeline:
             stream_format=cfg.stream_format,
             threads=cfg.threads,
             sliced_threads=cfg.sliced_threads,
+            # With the terminator every AU already ends in an AUD; x264's own
+            # leading AUD would make it two per frame.
+            aud=not cfg.au_terminator,
         )
         if profile_caps:
             chain.caps(profile_caps)
@@ -255,11 +261,19 @@ def build_pipeline(cfg: PipelineConfig, plat: Platform) -> BuiltPipeline:
         timestamp_overlay.attach()
 
     sei_injector: SeiInjector | None = None
-    if cfg.codec == "h264" and cfg.sei_metadata and sei_pad_owner is not None:
+    if (
+        cfg.codec == "h264"
+        and (cfg.sei_metadata or cfg.au_terminator)
+        and sei_pad_owner is not None
+    ):
         src_pad = sei_pad_owner.get_static_pad("src")
         if src_pad is None:
             raise PipelineError("could not get pad for SEI injection")
-        sei_injector = SeiInjector(cfg.stream_format)
+        sei_injector = SeiInjector(
+            cfg.stream_format,
+            sei_metadata=cfg.sei_metadata,
+            au_terminator=cfg.au_terminator,
+        )
         sei_injector.attach(src_pad)
 
     return BuiltPipeline(

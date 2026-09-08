@@ -8,6 +8,12 @@ the source at capture) converted from the pipeline clock to wall-clock Unix
 microseconds. Latency measured against it therefore includes capture-to-encoder
 queuing and encode time, not just transport. If a buffer has no usable PTS the
 current time is used instead.
+
+The same probe can also terminate every access unit with an AUD NAL
+(``au_terminator``). A receiver that parses the byte stream (the hybrid-bridge
+publisher's ``h264parse``, ``parse-h264``) otherwise only learns that frame N
+is complete when the first NAL of frame N+1 arrives, one frame interval later;
+an AUD at the tail of each AU closes it as soon as its last byte is in.
 """
 
 from __future__ import annotations
@@ -28,6 +34,12 @@ SEI_UUID = bytes.fromhex("3fa85f6457174562b3fc2c963f66afa6")
 PACKET_TRAILER_MAGIC = b"LKTS"
 TAG_USER_TIMESTAMP = 0x01
 TAG_FRAME_ID = 0x02
+
+# Access unit delimiter (nal_unit_type 9): nal_ref_idc 0, primary_pic_type 7
+# ("any slice types") followed by the RBSP stop bit. An AUD is always exactly
+# these two bytes, so a parser can complete it without waiting for the next
+# start code.
+AUD_NAL = bytes([0x09, 0xF0])
 
 
 def append_packet_trailer(timestamp_us: int, frame_id: int = 0) -> bytes:
@@ -100,6 +112,13 @@ def create_sei_nalu(
     return bytes(sei_nalu)
 
 
+def create_aud_nalu(stream_format: str = "byte-stream") -> bytes:
+    """Return an access unit delimiter NAL in the stream's framing."""
+    if stream_format == "avc":
+        return struct.pack(">I", len(AUD_NAL)) + AUD_NAL
+    return b"\x00\x00\x00\x01" + AUD_NAL
+
+
 def capture_time_us(pad: Gst.Pad, buffer: Gst.Buffer) -> int | None:
     """Wall-clock capture time of `buffer` in microseconds, or None if unknown.
 
@@ -132,13 +151,22 @@ def capture_time_us(pad: Gst.Pad, buffer: Gst.Buffer) -> int | None:
 
 
 class SeiInjector:
-    """Injects an SEI NAL unit in front of every access unit via a pad probe.
-
-    The SEI timestamp is the frame's capture time (see capture_time_us).
+    """Rewrites every access unit via a pad probe: an SEI NAL (capture
+    timestamp + frame id, see capture_time_us) is prepended when
+    ``sei_metadata`` is set, and an AUD NAL is appended when ``au_terminator``
+    is set. Attach it to a pad that carries AU-aligned buffers.
     """
 
-    def __init__(self, stream_format: str = "byte-stream"):
+    def __init__(
+        self,
+        stream_format: str = "byte-stream",
+        sei_metadata: bool = True,
+        au_terminator: bool = False,
+    ):
         self.stream_format = stream_format
+        self.sei_metadata = sei_metadata
+        self.au_terminator = au_terminator
+        self._aud = create_aud_nalu(stream_format) if au_terminator else b""
         self.probe_id: int = 0
         self.frame_count: int = 0
         self.next_frame_id: int = 1
@@ -154,21 +182,23 @@ class SeiInjector:
         if not buffer:
             return Gst.PadProbeReturn.OK
 
-        frame_id = self.next_frame_id
-        self.next_frame_id = (self.next_frame_id % 0xFFFFFFFF) + 1
+        sei_nalu = b""
+        if self.sei_metadata:
+            frame_id = self.next_frame_id
+            self.next_frame_id = (self.next_frame_id % 0xFFFFFFFF) + 1
 
-        timestamp_us = capture_time_us(pad, buffer)
-        if timestamp_us is None:
-            self.fallback_count += 1
-            if self.fallback_count == 1:
-                log.warning(
-                    "buffer has no usable PTS; SEI timestamp falls back to current time"
-                )
-        sei_nalu = create_sei_nalu(
-            timestamp_us=timestamp_us,
-            frame_id=frame_id,
-            stream_format=self.stream_format,
-        )
+            timestamp_us = capture_time_us(pad, buffer)
+            if timestamp_us is None:
+                self.fallback_count += 1
+                if self.fallback_count == 1:
+                    log.warning(
+                        "buffer has no usable PTS; SEI timestamp falls back to current time"
+                    )
+            sei_nalu = create_sei_nalu(
+                timestamp_us=timestamp_us,
+                frame_id=frame_id,
+                stream_format=self.stream_format,
+            )
 
         success, map_info = buffer.map(Gst.MapFlags.READ)
         if not success:
@@ -178,7 +208,7 @@ class SeiInjector:
         finally:
             buffer.unmap(map_info)
 
-        new_buffer = Gst.Buffer.new_wrapped(sei_nalu + original_data)
+        new_buffer = Gst.Buffer.new_wrapped(sei_nalu + original_data + self._aud)
         new_buffer.pts = buffer.pts
         new_buffer.dts = buffer.dts
         new_buffer.duration = buffer.duration
@@ -192,6 +222,6 @@ class SeiInjector:
 
         self.frame_count += 1
         if self.frame_count % 300 == 0:
-            log.debug("Injected SEI into %d frames", self.frame_count)
+            log.debug("Rewrote %d access units", self.frame_count)
 
         return Gst.PadProbeReturn.DROP

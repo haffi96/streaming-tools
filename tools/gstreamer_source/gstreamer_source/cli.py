@@ -120,6 +120,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="inject SEI timestamp/frame-id NAL before every access unit (h264 only)",
     )
     enc.add_argument(
+        "--au-terminator",
+        "--au_terminator",
+        dest="au_terminator",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="append an AUD NAL to every access unit so a byte-stream receiver "
+        "(hybrid-bridge publisher, parse-h264) completes each frame on arrival "
+        "instead of when the next frame starts (h264 only)",
+    )
+    enc.add_argument(
         "--timestamps",
         action=argparse.BooleanOptionalAction,
         default=False,
@@ -205,7 +215,7 @@ def _run(built: BuiltPipeline, duration: float | None) -> int:
         log.info("Interrupted")
     finally:
         built.pipeline.set_state(Gst.State.NULL)
-        if built.sei_injector:
+        if built.sei_injector and built.sei_injector.sei_metadata:
             log.info("Injected SEI into %d frames", built.sei_injector.frame_count)
     return exit_code
 
@@ -272,6 +282,7 @@ def main(argv: list[str] | None = None) -> int:
         fps=args.fps,
         pattern=args.pattern,
         sei_metadata=args.sei_metadata,
+        au_terminator=args.au_terminator,
         timestamps=args.timestamps,
         camera=camera,
         camera_format=args.camera_format,
@@ -288,13 +299,14 @@ def main(argv: list[str] | None = None) -> int:
         log.info("Overlay: running millisecond clock (textoverlay)")
     if built.encoder:
         log.info(
-            "Encoder: %s (%s) %s profile, %d kbps, %s, SEI %s%s",
+            "Encoder: %s (%s) %s profile, %d kbps, %s, SEI %s, AU terminator %s%s",
             built.encoder.key,
             built.encoder.element,
             cfg.profile,
             cfg.bitrate_kbps,
             cfg.stream_format,
-            "on" if built.sei_injector else "off",
+            "on" if cfg.sei_metadata else "off",
+            "on" if cfg.au_terminator else "off",
             (
                 f", threads={cfg.threads if cfg.threads is not None else (4 if cfg.sliced_threads else 1)} "
                 + (
