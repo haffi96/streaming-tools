@@ -63,6 +63,11 @@ uv run gstreamer-source --no-sei-metadata
 
 # Burn a running millisecond clock (h:mm:ss.mmm since start) into the frames
 uv run gstreamer-source --timestamps
+
+# Several instances with identical SEI timestamps (multi-camera simulation)
+uv run gstreamer-source --align-frames --port 5004
+uv run gstreamer-source --align-frames --port 5005
+uv run check-sync localhost:5004 localhost:5005
 ```
 
 Inspect a stream or file with the parser. It logs every frame (size, NAL
@@ -152,7 +157,8 @@ Hardware encoders always emit one slice per frame.
 Pipeline shape:
 
 ```
-source ! NV12 caps ! queue(leaky, 1 buffer) ! [textoverlay]   <- --timestamps
+source ! NV12 caps ! [clocksync]   <- --align-frames
+       ! queue(leaky, 1 buffer) ! [textoverlay]   <- --timestamps
        ! [nvvidconv] ! <encoder> ! [profile caps] ! h264parse config-interval=-1
        ! video/x-h264,stream-format=<byte-stream|avc>,alignment=au   <- SEI probe
        ! tcpserversink | filesink
@@ -174,6 +180,66 @@ latency `parse-h264 --sei-detection` reports therefore covers capture-to-
 encoder queuing, encoding, and transport, not just transport. Sensor exposure
 itself is not included unless the driver's timestamp already accounts for it.
 Cross-machine measurements need synchronized clocks.
+
+## Simulating a synchronized multi-camera rig
+
+On the AV every camera is triggered by the same signal, so all streams carry
+the same SEI timestamp at any moment even though each camera started at a
+different time and their frame ids differ. One `gstreamer-source` per camera
+reproduces that with `--align-frames`:
+
+```bash
+uv run gstreamer-source --align-frames --port 5004 &
+uv run gstreamer-source --align-frames --port 5005 &
+uv run gstreamer-source --align-frames --port 5006 &
+```
+
+Without the flag every instance's frame grid starts wherever its source thread
+happened to start, so two instances differ by a random sub-frame offset and
+never produce the same timestamp. With it the test source runs non-live (PTS
+is exactly n / fps), the pipeline is pinned to `CLOCK_REALTIME` with its base
+time set to an upcoming wall-clock frame instant, and a `clocksync` element
+releases frame n at exactly (k + n) / fps seconds since the Unix epoch.
+Instances on the same clock therefore emit the same SEI timestamp for the same
+instant no matter when each was started; the timestamp is also snapped to that
+grid so the values are identical bit for bit. Frame ids still start at 1 per
+instance, exactly like real cameras that came up at different times. Frames a
+slow encoder drops (leaky queue) leave a gap on that stream only. Only the
+test pattern can be aligned; cameras keep their own capture times. Instances
+on different hosts need their clocks synchronized (PTP/NTP).
+
+`check-sync` connects to every stream (or reads recorded files), pairs frames
+by SEI timestamp and reports whether every instant was seen on every stream:
+
+```bash
+uv run check-sync localhost:5004 localhost:5005 localhost:5006 --duration 10
+uv run check-sync cam0.h264 cam1.h264            # recorded with --output file
+```
+
+```
+[   5.0s] matched=150  mismatched=0  skew max=15.1ms  frames=152/151/152
+MISMATCH ts=1789415437833333 (...37.833333+00:00): seen on [localhost:5005] missing on [localhost:5004,localhost:5006]
+
+Streams: 3
+  localhost:5004: frames=209 missing=1 stray=0 first=...30.866666+00:00 (id 96) grid-offset=+0us
+  ...
+Timestamps in common window: 210, matched on all streams: 209, mismatched: 1
+Arrival skew of the same frame across streams: mean 5.8ms, max 15.1ms
+All timestamps sit on the 30 fps wall-clock grid
+RESULT: OUT OF SYNC
+```
+
+A timestamp counts as *matched* when every stream that was already running
+produced it, *missing* on a stream that had started but skipped it (a dropped
+frame), and timestamps before a stream's first frame are not held against it.
+A stream is only judged to have missed an instant once it has delivered a
+frame `--hold` seconds (default 0.5) past it, so arrival skew between streams
+never reads as a mismatch; the skew itself is reported separately. The exit
+status is 0 only when every instant in the common window matched, so the
+command can gate a test. `--fps` (default 30) additionally checks that every
+timestamp sits on the wall-clock frame grid: off-grid values mean a source was
+started without `--align-frames`. Frames are paired purely by SEI timestamp;
+frame ids are printed but never compared.
 
 ## Timestamp overlay
 

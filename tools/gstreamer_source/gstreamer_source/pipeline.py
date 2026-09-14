@@ -11,6 +11,7 @@ With --codec nv12 the encoder stage is skipped and raw NV12 frames go to the sin
 from __future__ import annotations
 
 import logging
+import time
 from dataclasses import dataclass
 
 import gi
@@ -53,6 +54,10 @@ class PipelineConfig:
     # complete the frame without waiting for the next one (see sei.py).
     au_terminator: bool = True
     timestamps: bool = False  # burn a running millisecond clock into the frames
+    # Generate test-pattern frames on the wall-clock frame grid (frame k at
+    # k / fps seconds since the Unix epoch) and snap SEI timestamps to it, so
+    # several instances started at different times emit identical timestamps.
+    align_frames: bool = False
     camera: Camera | None = None
     camera_format: str = "auto"  # auto | raw | mjpeg (v4l2 cameras only)
 
@@ -64,9 +69,40 @@ class BuiltPipeline:
     encoder: EncoderStatus | None
     chain: list[str]
     timestamp_overlay: TimestampOverlay | None = None
+    align_fps: int | None = None  # set with --align-frames; see align_start_time
 
     def describe(self) -> str:
         return " ! ".join(self.chain)
+
+
+# How far ahead of "now" the aligned frame 0 is placed, to cover the start-up
+# of the pipeline. If start-up takes longer the first frames are released late
+# but keep their exact grid timestamps.
+ALIGN_LEAD_NS = 300_000_000
+
+
+def align_start_time(pipeline: Gst.Pipeline, fps: int) -> int:
+    """Pin the pipeline to CLOCK_REALTIME and set its base time to an upcoming
+    wall-clock frame instant.
+
+    In --align-frames mode the test source runs non-live, so frame n carries
+    PTS n / fps exactly, and a clocksync element releases it at base_time +
+    PTS, i.e. at (k + n) / fps seconds since the Unix epoch for an integer k.
+    (A live videotestsrc cannot be used: it stamps its first frame with
+    whatever running time its thread starts at, which fixes an arbitrary
+    phase.) Call before setting the pipeline to PLAYING; returns the base
+    time in Unix ns.
+    """
+    clock = Gst.SystemClock.obtain()
+    clock.set_property("clock-type", Gst.ClockType.REALTIME)
+    pipeline.use_clock(clock)
+    # Stop GstPipeline from recomputing base_time on PAUSED -> PLAYING.
+    pipeline.set_start_time(Gst.CLOCK_TIME_NONE)
+    now_ns = time.time_ns() + ALIGN_LEAD_NS
+    k = -(-now_ns * fps // Gst.SECOND)  # ceil
+    base_time = k * Gst.SECOND // fps
+    pipeline.set_base_time(base_time)
+    return base_time
 
 
 class _Chain:
@@ -127,9 +163,21 @@ def build_pipeline(cfg: PipelineConfig, plat: Platform) -> BuiltPipeline:
 
     # ---- source ----
     cam = cfg.camera
+    if cfg.align_frames and cam is not None:
+        raise PipelineError(
+            "--align-frames schedules test-pattern frames on the wall clock and "
+            "cannot be used with a camera (its capture times are its own)"
+        )
     if cam is None:
-        chain.make("videotestsrc", {"pattern": cfg.pattern, "is-live": True})
+        chain.make(
+            "videotestsrc",
+            {"pattern": cfg.pattern, "is-live": not cfg.align_frames},
+        )
         chain.caps(raw_caps)
+        if cfg.align_frames:
+            # Non-live source: PTS is exactly n / fps. clocksync holds every
+            # frame until base_time + PTS on the (wall) pipeline clock.
+            chain.make("clocksync")
     elif cam.kind == "csi":
         chain.make(cam.element, dict(cam.properties))
         chain.caps(nvmm_caps)
@@ -273,9 +321,15 @@ def build_pipeline(cfg: PipelineConfig, plat: Platform) -> BuiltPipeline:
             cfg.stream_format,
             sei_metadata=cfg.sei_metadata,
             au_terminator=cfg.au_terminator,
+            grid_fps=cfg.fps if cfg.align_frames else None,
         )
         sei_injector.attach(src_pad)
 
     return BuiltPipeline(
-        pipeline, sei_injector, encoder_status, chain.chain, timestamp_overlay
+        pipeline,
+        sei_injector,
+        encoder_status,
+        chain.chain,
+        timestamp_overlay,
+        align_fps=cfg.fps if cfg.align_frames else None,
     )
