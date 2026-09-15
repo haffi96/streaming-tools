@@ -19,7 +19,13 @@ from .encoders import (
     encoder_preference,
     list_encoders,
 )
-from .pipeline import BuiltPipeline, PipelineConfig, PipelineError, build_pipeline
+from .pipeline import (
+    BuiltPipeline,
+    PipelineConfig,
+    PipelineError,
+    align_start_time,
+    build_pipeline,
+)
 from .platform import platform_info
 
 log = logging.getLogger("gstreamer_source")
@@ -136,6 +142,18 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="burn a running millisecond clock (h:mm:ss.mmm since start, taken "
         "from each frame's capture time) into the top-left of every frame",
     )
+    enc.add_argument(
+        "--align-frames",
+        "--align_frames",
+        dest="align_frames",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="generate test-pattern frames on the wall-clock frame grid (frame k "
+        "at k/fps s since the Unix epoch) and snap SEI timestamps to it, so "
+        "several instances on the same clock emit identical SEI timestamps "
+        "at any moment no matter when each was started (test pattern only; "
+        "verify with check-sync)",
+    )
 
     out = p.add_argument_group("output")
     out.add_argument("--output", choices=["tcp", "file"], default="tcp")
@@ -203,6 +221,13 @@ def _run(built: BuiltPipeline, duration: float | None) -> int:
 
         GLib.timeout_add(int(duration * 1000), send_eos)
 
+    if built.align_fps:
+        base_time = align_start_time(built.pipeline, built.align_fps)
+        log.info(
+            "Frame grid aligned to wall clock: frame 0 at %.6f (Unix s), %d fps",
+            base_time / Gst.SECOND,
+            built.align_fps,
+        )
     ret = built.pipeline.set_state(Gst.State.PLAYING)
     if ret == Gst.StateChangeReturn.FAILURE:
         log.error("pipeline refused to start")
@@ -284,6 +309,7 @@ def main(argv: list[str] | None = None) -> int:
         sei_metadata=args.sei_metadata,
         au_terminator=args.au_terminator,
         timestamps=args.timestamps,
+        align_frames=args.align_frames,
         camera=camera,
         camera_format=args.camera_format,
     )

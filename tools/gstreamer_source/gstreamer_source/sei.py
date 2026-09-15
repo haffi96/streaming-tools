@@ -146,8 +146,31 @@ def capture_time_us(pad: Gst.Pad, buffer: Gst.Buffer) -> int | None:
     base_time = element.get_base_time()
     if clock is None or base_time == Gst.CLOCK_TIME_NONE:
         return None
-    age_ns = clock.get_time() - (base_time + running_time)
+    capture_ns = base_time + running_time
+    if _is_realtime_clock(clock):
+        # The pipeline clock already is CLOCK_REALTIME (--align-frames), so
+        # the capture instant is a wall-clock value without a second clock read.
+        return capture_ns // 1000
+    age_ns = clock.get_time() - capture_ns
     return (time.time_ns() - age_ns) // 1000
+
+
+def _is_realtime_clock(clock: Gst.Clock) -> bool:
+    if clock.find_property("clock-type") is None:
+        return False
+    return clock.get_property("clock-type") == Gst.ClockType.REALTIME
+
+
+def frame_grid_us(timestamp_us: int, fps: int) -> int:
+    """Snap a microsecond timestamp to the nearest frame instant of the
+    wall-clock frame grid (frame k of `fps` per second sits at k * 1e6 // fps).
+
+    Sources started with --align-frames generate frames on this grid, so after
+    snapping, every instance on the same clock emits identical SEI timestamps
+    for the same instant regardless of when it was started.
+    """
+    k = (timestamp_us * fps + 500_000) // 1_000_000
+    return k * 1_000_000 // fps
 
 
 class SeiInjector:
@@ -162,10 +185,14 @@ class SeiInjector:
         stream_format: str = "byte-stream",
         sei_metadata: bool = True,
         au_terminator: bool = False,
+        grid_fps: int | None = None,
     ):
         self.stream_format = stream_format
         self.sei_metadata = sei_metadata
         self.au_terminator = au_terminator
+        # When set, SEI timestamps are snapped to the wall-clock frame grid
+        # (see frame_grid_us) so aligned instances agree bit for bit.
+        self.grid_fps = grid_fps
         self._aud = create_aud_nalu(stream_format) if au_terminator else b""
         self.probe_id: int = 0
         self.frame_count: int = 0
@@ -194,6 +221,8 @@ class SeiInjector:
                     log.warning(
                         "buffer has no usable PTS; SEI timestamp falls back to current time"
                     )
+            elif self.grid_fps:
+                timestamp_us = frame_grid_us(timestamp_us, self.grid_fps)
             sei_nalu = create_sei_nalu(
                 timestamp_us=timestamp_us,
                 frame_id=frame_id,

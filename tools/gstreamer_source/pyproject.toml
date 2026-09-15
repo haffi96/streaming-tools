@@ -11,6 +11,7 @@ dependencies = [
 [project.scripts]
 gstreamer-source = "gstreamer_source.cli:main"
 parse-h264 = "gstreamer_source.parse:main"
+check-sync = "gstreamer_source.sync_check:main"
 
 [build-system]
 requires = ["hatchling"]
