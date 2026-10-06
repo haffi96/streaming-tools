@@ -1,7 +1,7 @@
 [project]
 name = "gstreamer-source"
 version = "0.2.0"
-description = "Cross-platform GStreamer camera/test source: H.264 (byte-stream or avc) or NV12 over TCP or file, with SEI timestamp metadata."
+description = "Cross-platform GStreamer camera/test source: H.264/H.265 (byte-stream or length-prefixed) or NV12 over TCP or file, with SEI timestamp metadata."
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
@@ -11,6 +11,7 @@ dependencies = [
 [project.scripts]
 gstreamer-source = "gstreamer_source.cli:main"
 parse-h264 = "gstreamer_source.parse:main"
+parse-h265 = "gstreamer_source.parse:main_h265"
 
 [build-system]
 requires = ["hatchling"]

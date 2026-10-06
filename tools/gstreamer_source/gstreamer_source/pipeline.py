@@ -2,10 +2,15 @@
 
 Shape:
   source -> NV12 caps -> leaky 1-buffer queue -> [textoverlay (--timestamps)]
-         -> [nvvidconv] -> encoder -> [profile caps] -> h264parse
+         -> [nvvidconv] -> encoder -> [profile caps] -> h264parse | h265parse
          -> stream-format caps (SEI / AU-terminator probe) -> tcpserversink | filesink
 
 With --codec nv12 the encoder stage is skipped and raw NV12 frames go to the sink.
+
+The CLI stream format ``avc`` means "4-byte length-prefixed" for both codecs;
+for H.265 it maps to ``stream-format=hev1`` caps (hev1 rather than hvc1
+because the VPS/SPS/PPS travel in-band before every IDR, which hvc1 does not
+allow). The bytes on the wire are the same either way.
 """
 
 from __future__ import annotations
@@ -19,7 +24,12 @@ gi.require_version("Gst", "1.0")
 from gi.repository import Gst
 
 from .cameras import Camera
-from .encoders import EncoderStatus, configure_encoder, resolve_encoder
+from .encoders import (
+    EncoderStatus,
+    configure_encoder,
+    default_profile,
+    resolve_encoder,
+)
 from .overlay import TimestampOverlay
 from .platform import Platform
 from .sei import SeiInjector
@@ -37,11 +47,11 @@ class PipelineConfig:
     path: str | None = None
     bind: str = "0.0.0.0"
     port: int = 5004
-    codec: str = "h264"  # h264 | nv12
-    stream_format: str = "byte-stream"  # byte-stream | avc
+    codec: str = "h264"  # h264 | h265 | nv12
+    stream_format: str = "byte-stream"  # byte-stream | avc (4-byte length prefixes)
     encoder: str = "auto"
     bitrate_kbps: int = 2000
-    profile: str = "baseline"
+    profile: str | None = None  # None -> baseline (h264) / main (h265)
     threads: int | None = None  # x264 only; None -> 4 if sliced_threads else 1
     sliced_threads: bool = False  # x264 only; True -> multiple slices per frame
     width: int = 1280
@@ -67,6 +77,13 @@ class BuiltPipeline:
 
     def describe(self) -> str:
         return " ! ".join(self.chain)
+
+
+def caps_stream_format(codec: str, stream_format: str) -> str:
+    """GStreamer stream-format caps value for a CLI --stream-format."""
+    if codec == "h265" and stream_format == "avc":
+        return "hev1"
+    return stream_format
 
 
 class _Chain:
@@ -212,7 +229,7 @@ def build_pipeline(cfg: PipelineConfig, plat: Platform) -> BuiltPipeline:
             chain.make("nvvidconv")
             chain.caps(raw_caps)
     else:
-        encoder_status = resolve_encoder(cfg.encoder, plat)
+        encoder_status = resolve_encoder(cfg.encoder, plat, cfg.codec)
         if encoder_status.spec.needs_nvmm and not nvmm:
             chain.make("nvvidconv")
             chain.caps(nvmm_caps)
@@ -227,7 +244,7 @@ def build_pipeline(cfg: PipelineConfig, plat: Platform) -> BuiltPipeline:
             encoder,
             fps=cfg.fps,
             bitrate_kbps=cfg.bitrate_kbps,
-            profile=cfg.profile,
+            profile=cfg.profile or default_profile(cfg.codec),
             stream_format=cfg.stream_format,
             threads=cfg.threads,
             sliced_threads=cfg.sliced_threads,
@@ -238,11 +255,13 @@ def build_pipeline(cfg: PipelineConfig, plat: Platform) -> BuiltPipeline:
         if profile_caps:
             chain.caps(profile_caps)
 
-        # config-interval=-1: SPS/PPS before every IDR, only if the encoder
-        # did not already emit them.
-        chain.make("h264parse", {"config-interval": -1})
+        # config-interval=-1: SPS/PPS (and VPS for H.265) before every IDR,
+        # only if the encoder did not already emit them.
+        media = "video/x-h265" if cfg.codec == "h265" else "video/x-h264"
+        chain.make(f"{cfg.codec}parse", {"config-interval": -1})
         sei_pad_owner = chain.caps(
-            f"video/x-h264,stream-format={cfg.stream_format},alignment=au"
+            f"{media},stream-format={caps_stream_format(cfg.codec, cfg.stream_format)},"
+            "alignment=au"
         )
 
     # ---- sink ----
@@ -262,7 +281,7 @@ def build_pipeline(cfg: PipelineConfig, plat: Platform) -> BuiltPipeline:
 
     sei_injector: SeiInjector | None = None
     if (
-        cfg.codec == "h264"
+        cfg.codec in ("h264", "h265")
         and (cfg.sei_metadata or cfg.au_terminator)
         and sei_pad_owner is not None
     ):
@@ -273,6 +292,7 @@ def build_pipeline(cfg: PipelineConfig, plat: Platform) -> BuiltPipeline:
             cfg.stream_format,
             sei_metadata=cfg.sei_metadata,
             au_terminator=cfg.au_terminator,
+            codec=cfg.codec,
         )
         sei_injector.attach(src_pad)
 

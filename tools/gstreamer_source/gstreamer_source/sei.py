@@ -14,6 +14,21 @@ The same probe can also terminate every access unit with an AUD NAL
 publisher's ``h264parse``, ``parse-h264``) otherwise only learns that frame N
 is complete when the first NAL of frame N+1 arrives, one frame interval later;
 an AUD at the tail of each AU closes it as soon as its last byte is in.
+
+H.264 and H.265 carry the same SEI payload; only the NAL headers differ:
+
+  H.264 SEI:  06                         nal_unit_type 6
+  H.265 SEI:  4E 01                      prefix SEI, nal_unit_type 39, layer 0, tid 1
+  H.264 AUD:  09 F0                      primary_pic_type 7 + stop bit
+  H.265 AUD:  46 01 50                   nal_unit_type 35, pic_type 2 + stop bit
+
+followed (SEI only) by payloadType 5 (user_data_unregistered), payloadSize,
+UUID, LKTS trailer and the 0x80 RBSP stop byte. Emulation prevention bytes are
+inserted where the payload would otherwise contain a start code.
+
+Framing follows the stream: a 4-byte start code for byte-stream, a 4-byte
+big-endian length for the length-prefixed formats (``avc``, and ``hvc1`` /
+``hev1`` caps for H.265).
 """
 
 from __future__ import annotations
@@ -40,6 +55,41 @@ TAG_FRAME_ID = 0x02
 # these two bytes, so a parser can complete it without waiting for the next
 # start code.
 AUD_NAL = bytes([0x09, 0xF0])
+
+# HEVC access unit delimiter: 2-byte NAL header (forbidden_zero_bit 0,
+# nal_unit_type 35, nuh_layer_id 0, nuh_temporal_id_plus1 1), then pic_type 2
+# ("I, P, B") in 3 bits followed by the RBSP stop bit: 010 1 0000 = 0x50.
+# Always exactly three bytes.
+HEVC_AUD_NAL = bytes([0x46, 0x01, 0x50])
+
+# NAL headers of the SEI NAL: H.264 nal_unit_type 6; HEVC prefix SEI
+# (nal_unit_type 39, nuh_layer_id 0, nuh_temporal_id_plus1 1).
+SEI_NAL_HEADER = {"h264": bytes([0x06]), "h265": bytes([0x4E, 0x01])}
+AUD_NALS = {"h264": AUD_NAL, "h265": HEVC_AUD_NAL}
+
+# stream_format values that mean 4-byte length prefixes rather than start codes.
+LENGTH_PREFIXED_FORMATS = ("avc", "hvc1", "hev1")
+
+
+def _frame_nal(nal: bytes, stream_format: str) -> bytes:
+    """Prefix a NAL with a 4-byte length or a 4-byte Annex B start code."""
+    if stream_format in LENGTH_PREFIXED_FORMATS:
+        return struct.pack(">I", len(nal)) + nal
+    return b"\x00\x00\x00\x01" + nal
+
+
+def add_emulation_prevention(rbsp: bytes) -> bytes:
+    """Insert emulation_prevention_three_byte (0x03) after every 00 00 that is
+    followed by a byte <= 0x03, so the NAL payload cannot contain a start code."""
+    out = bytearray()
+    zeros = 0
+    for byte in rbsp:
+        if zeros >= 2 and byte <= 0x03:
+            out.append(0x03)
+            zeros = 0
+        out.append(byte)
+        zeros = zeros + 1 if byte == 0 else 0
+    return bytes(out)
 
 
 def append_packet_trailer(timestamp_us: int, frame_id: int = 0) -> bytes:
@@ -71,13 +121,16 @@ def create_sei_nalu(
     timestamp_us: int | None = None,
     frame_id: int = 0,
     stream_format: str = "byte-stream",
+    codec: str = "h264",
 ) -> bytes:
     """Create an SEI NAL unit containing timestamp/frame ID metadata.
 
     Args:
         timestamp_us: Timestamp in microseconds. If None, uses current time.
         frame_id: Optional frame ID to include in the packet trailer.
-        stream_format: 'byte-stream' for Annex B or 'avc' for length-prefixed
+        stream_format: 'byte-stream' for Annex B or 'avc' (also 'hvc1'/'hev1')
+            for 4-byte length-prefixed
+        codec: 'h264' (SEI NAL type 6) or 'h265' (prefix SEI NAL type 39)
 
     Returns:
         Bytes containing a complete SEI NAL unit with timestamp/frame ID metadata.
@@ -90,33 +143,25 @@ def create_sei_nalu(
     payload_type = 5  # user_data_unregistered
     payload_size = len(payload)
 
-    nal_content = bytearray()
-    # NAL header: nal_ref_idc=0, nal_unit_type=6 (SEI)
-    nal_content.append(0x06)
+    rbsp = bytearray()
     # Payload type (single byte since 5 < 255)
-    nal_content.append(payload_type)
+    rbsp.append(payload_type)
     # Payload size (single byte for the current timestamp/frame ID payload)
-    nal_content.append(payload_size)
-    nal_content.extend(payload)
+    rbsp.append(payload_size)
+    rbsp.extend(payload)
     # RBSP trailing bits (stop bit + alignment)
-    nal_content.append(0x80)
+    rbsp.append(0x80)
 
-    sei_nalu = bytearray()
-    if stream_format == "avc":
-        # AVC format: 4-byte big-endian length prefix
-        sei_nalu.extend(struct.pack(">I", len(nal_content)))
-    else:
-        # Annex B format: start code
-        sei_nalu.extend([0x00, 0x00, 0x00, 0x01])
-    sei_nalu.extend(nal_content)
-    return bytes(sei_nalu)
+    # NAL header: H.264 nal_ref_idc=0, nal_unit_type=6 (SEI); HEVC prefix SEI
+    # (39). The XOR-ed trailer can contain 00 00 0x runs (e.g. a 0xFFFF in
+    # the timestamp), so the payload gets emulation prevention.
+    nal = SEI_NAL_HEADER[codec] + add_emulation_prevention(bytes(rbsp))
+    return _frame_nal(nal, stream_format)
 
 
-def create_aud_nalu(stream_format: str = "byte-stream") -> bytes:
+def create_aud_nalu(stream_format: str = "byte-stream", codec: str = "h264") -> bytes:
     """Return an access unit delimiter NAL in the stream's framing."""
-    if stream_format == "avc":
-        return struct.pack(">I", len(AUD_NAL)) + AUD_NAL
-    return b"\x00\x00\x00\x01" + AUD_NAL
+    return _frame_nal(AUD_NALS[codec], stream_format)
 
 
 def capture_time_us(pad: Gst.Pad, buffer: Gst.Buffer) -> int | None:
@@ -162,11 +207,13 @@ class SeiInjector:
         stream_format: str = "byte-stream",
         sei_metadata: bool = True,
         au_terminator: bool = False,
+        codec: str = "h264",
     ):
         self.stream_format = stream_format
         self.sei_metadata = sei_metadata
         self.au_terminator = au_terminator
-        self._aud = create_aud_nalu(stream_format) if au_terminator else b""
+        self.codec = codec
+        self._aud = create_aud_nalu(stream_format, codec) if au_terminator else b""
         self.probe_id: int = 0
         self.frame_count: int = 0
         self.next_frame_id: int = 1
@@ -198,6 +245,7 @@ class SeiInjector:
                 timestamp_us=timestamp_us,
                 frame_id=frame_id,
                 stream_format=self.stream_format,
+                codec=self.codec,
             )
 
         success, map_info = buffer.map(Gst.MapFlags.READ)
