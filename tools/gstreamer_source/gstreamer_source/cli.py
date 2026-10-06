@@ -13,9 +13,13 @@ from gi.repository import GLib, Gst
 
 from .cameras import CameraError, enumerate_cameras, format_camera_list, select_camera
 from .encoders import (
+    CODEC_LABELS,
+    CODECS,
     ENCODER_KEYS,
     PROFILES,
+    PROFILES_BY_CODEC,
     EncoderError,
+    default_profile,
     encoder_preference,
     list_encoders,
 )
@@ -29,8 +33,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="gstreamer-source",
         description=(
-            "Camera / test-pattern source producing H.264 (byte-stream or avc) or raw "
-            "NV12 over TCP or into a file, with SEI timestamp metadata."
+            "Camera / test-pattern source producing H.264 or H.265 (byte-stream or "
+            "4-byte length-prefixed) or raw NV12 over TCP or into a file, with SEI "
+            "timestamp metadata."
         ),
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
@@ -39,7 +44,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--list-cameras", action="store_true", help="list detected cameras and exit"
     )
     info.add_argument(
-        "--list-encoders", action="store_true", help="list H.264 encoders and exit"
+        "--list-encoders",
+        action="store_true",
+        help="list H.264 and H.265 encoders and exit",
     )
 
     src = p.add_argument_group("source")
@@ -70,27 +77,33 @@ def build_arg_parser() -> argparse.ArgumentParser:
     enc = p.add_argument_group("encoding")
     enc.add_argument(
         "--codec",
-        choices=["h264", "nv12"],
+        choices=[*CODECS, "nv12"],
         default="h264",
-        help="h264 or raw NV12 frames",
+        help="h264, h265 (HEVC) or raw NV12 frames",
     )
     enc.add_argument(
         "--stream-format",
         choices=["byte-stream", "avc"],
         default="byte-stream",
-        help="H.264 framing: Annex B start codes or 4-byte length prefixes",
+        help="framing: Annex B start codes, or 'avc' = 4-byte length prefixes "
+        "(stream-format=avc caps for h264, hev1 for h265)",
     )
     enc.add_argument(
         "--encoder",
         choices=["auto", *ENCODER_KEYS],
         default="auto",
-        help="H.264 encoder; auto picks the best available for the platform",
+        help="encoder family (x264 is h264-only, x265 h265-only); auto picks "
+        "the best available for the platform and codec",
     )
     enc.add_argument(
         "--bitrate", type=int, default=2000, metavar="KBPS", help="target bitrate"
     )
     enc.add_argument(
-        "--profile", choices=list(PROFILES), default="baseline", help="H.264 profile"
+        "--profile",
+        choices=list(PROFILES),
+        default=None,
+        help="codec profile (default: baseline (constrained) for h264, main for "
+        "h265; h265 supports main only)",
     )
     enc.add_argument(
         "--threads",
@@ -98,7 +111,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default=None,
         metavar="N",
         help="x264 encoder threads (default: 1, or 4 with --sliced-threads; "
-        "without sliced threads every extra thread adds a frame of delay)",
+        "without sliced threads every extra thread adds a frame of delay; "
+        "ignored for h265)",
     )
     enc.add_argument(
         "--sliced-threads",
@@ -109,7 +123,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="x264: encode each frame as one slice per thread (lowest encode "
         "latency, several VCL NALs per frame). Fine for the hybrid-bridge "
         "passthrough; breaks livekit-cli, which treats every VCL NAL as a "
-        "frame. Default off: one slice per frame",
+        "frame. Default off: one slice per frame. Ignored for h265",
     )
     enc.add_argument(
         "--sei-metadata",
@@ -117,7 +131,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
         dest="sei_metadata",
         action=argparse.BooleanOptionalAction,
         default=True,
-        help="inject SEI timestamp/frame-id NAL before every access unit (h264 only)",
+        help="inject SEI timestamp/frame-id NAL before every access unit "
+        "(h264/h265 only)",
     )
     enc.add_argument(
         "--au-terminator",
@@ -127,7 +142,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default=True,
         help="append an AUD NAL to every access unit so a byte-stream receiver "
         "(hybrid-bridge publisher, parse-h264) completes each frame on arrival "
-        "instead of when the next frame starts (h264 only)",
+        "instead of when the next frame starts (h264/h265 only)",
     )
     enc.add_argument(
         "--timestamps",
@@ -160,14 +175,20 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
 
 def _print_encoders(plat) -> None:
-    preferred = encoder_preference(plat)
-    print(f"H.264 encoders (auto order for {plat.value}: {' > '.join(preferred)}):")
-    for status in list_encoders(plat):
-        mark = "yes" if status.available else "no "
-        element = status.element or "/".join(status.spec.elements)
-        print(f"  [{mark}] {status.key:<7} {element:<16} {status.spec.description}")
-        if not status.available:
-            print(f"        {status.reason}")
+    for i, codec in enumerate(CODECS):
+        if i:
+            print()
+        preferred = encoder_preference(plat, codec)
+        print(
+            f"{CODEC_LABELS[codec]} encoders (--codec {codec}, auto order for "
+            f"{plat.value}: {' > '.join(preferred)}):"
+        )
+        for status in list_encoders(plat, codec):
+            mark = "yes" if status.available else "no "
+            element = status.element or "/".join(status.spec.elements)
+            print(f"  [{mark}] {status.key:<7} {element:<16} {status.spec.description}")
+            if not status.available:
+                print(f"        {status.reason}")
 
 
 def _run(built: BuiltPipeline, duration: float | None) -> int:
@@ -250,9 +271,25 @@ def main(argv: list[str] | None = None) -> int:
         log.error("--port must be within 1..65535")
         return 2
 
+    profile = args.profile
+    if args.codec in PROFILES_BY_CODEC:
+        profile = profile or default_profile(args.codec)
+        if profile not in PROFILES_BY_CODEC[args.codec]:
+            log.error(
+                "--profile %s is not available for %s (use %s)",
+                profile,
+                args.codec,
+                ", ".join(PROFILES_BY_CODEC[args.codec]),
+            )
+            return 2
+    if args.codec == "h265" and (args.threads is not None or args.sliced_threads):
+        log.warning("--threads / --sliced-threads are x264-only; ignored for h265")
+
     path = args.path
     if args.output == "file" and not path:
-        path = "output_sei.h264" if args.codec == "h264" else "output.nv12"
+        path = {"h264": "output_sei.h264", "h265": "output_sei.h265"}.get(
+            args.codec, "output.nv12"
+        )
 
     camera = None
     if args.camera is not None:
@@ -274,7 +311,7 @@ def main(argv: list[str] | None = None) -> int:
         stream_format=args.stream_format,
         encoder=args.encoder,
         bitrate_kbps=args.bitrate,
-        profile=args.profile,
+        profile=profile,
         threads=args.threads,
         sliced_threads=args.sliced_threads,
         width=args.width,
@@ -299,12 +336,17 @@ def main(argv: list[str] | None = None) -> int:
         log.info("Overlay: running millisecond clock (textoverlay)")
     if built.encoder:
         log.info(
-            "Encoder: %s (%s) %s profile, %d kbps, %s, SEI %s, AU terminator %s%s",
+            "Encoder: %s (%s) %s %s profile, %d kbps, %s, SEI %s, AU terminator %s%s",
             built.encoder.key,
             built.encoder.element,
+            CODEC_LABELS[cfg.codec],
             cfg.profile,
             cfg.bitrate_kbps,
-            cfg.stream_format,
+            (
+                "avc (4-byte length prefixes, hev1 caps)"
+                if cfg.codec == "h265" and cfg.stream_format == "avc"
+                else cfg.stream_format
+            ),
             "on" if cfg.sei_metadata else "off",
             "on" if cfg.au_terminator else "off",
             (
