@@ -59,7 +59,13 @@ ENCODERS: tuple[EncoderSpec, ...] = (
     EncoderSpec("x264", ("x264enc",), "software (libx264)"),
     EncoderSpec("vtenc", ("vtenc_h264_hw", "vtenc_h264"), "Apple VideoToolbox"),
     EncoderSpec("nvv4l2", ("nvv4l2h264enc",), "NVIDIA Jetson NVENC", needs_nvmm=True),
-    EncoderSpec("nvenc", ("nvh264enc", "nvautogpuh264enc"), "NVIDIA NVENC (nvcodec plugin)"),
+    # The CUDA-mode elements first: the legacy nvh26xenc in GStreamer 1.24 has
+    # no p1..p7 presets or tune, and current drivers (595) reject its old ones.
+    EncoderSpec(
+        "nvenc",
+        ("nvcudah264enc", "nvh264enc", "nvautogpuh264enc"),
+        "NVIDIA NVENC (nvcodec plugin)",
+    ),
     EncoderSpec("v4l2", ("v4l2h264enc",), "V4L2 stateful hardware encoder"),
     EncoderSpec("va", ("vah264enc",), "VA-API (va plugin)"),
     EncoderSpec("vaapi", ("vaapih264enc",), "VA-API (legacy gstreamer-vaapi)"),
@@ -76,7 +82,7 @@ ENCODERS: tuple[EncoderSpec, ...] = (
     ),
     EncoderSpec(
         "nvenc",
-        ("nvh265enc", "nvautogpuh265enc"),
+        ("nvcudah265enc", "nvh265enc", "nvautogpuh265enc"),
         "NVIDIA NVENC (nvcodec plugin)",
         codec="h265",
     ),
@@ -315,10 +321,12 @@ def configure_encoder(
         # Takes system-memory NV12 directly and picks the profile from caps.
         _set(element, "preset", "p1")
         _set(element, "tune", "ultra-low-latency")
-        _set(element, "rc-mode", "cbr")
+        _set(element, "rc-mode", "cbr")  # legacy nvh26xenc
+        _set(element, "rate-control", "cbr")  # nvcuda*/nvautogpu*
         _set(element, "bitrate", bitrate_kbps)
         _set(element, "gop-size", fps)
-        _set(element, "bframes", 0)
+        _set(element, "bframes", 0)  # legacy nvh26xenc
+        _set(element, "b-frames", 0)  # nvcuda*/nvautogpu*
         _set(element, "zerolatency", True)
         _set(element, "repeat-sequence-header", True)
         return f"video/x-h264,profile={caps_profile}"
@@ -411,10 +419,12 @@ def _configure_h265(
     if key == "nvenc":
         _set(element, "preset", "p1")
         _set(element, "tune", "ultra-low-latency")
-        _set(element, "rc-mode", "cbr")
+        _set(element, "rc-mode", "cbr")  # legacy nvh26xenc
+        _set(element, "rate-control", "cbr")  # nvcuda*/nvautogpu*
         _set(element, "bitrate", bitrate_kbps)
         _set(element, "gop-size", fps)
-        _set(element, "bframes", 0)
+        _set(element, "bframes", 0)  # legacy nvh26xenc
+        _set(element, "b-frames", 0)  # nvcuda*/nvautogpu*
         _set(element, "zerolatency", True)
         _set(element, "repeat-sequence-header", True)
         if not aud:
